@@ -1,7 +1,6 @@
-**mahimahi_validation**
+mahimahi_validation
 Validation pipeline for comparing Linux kernel DualPI2 vs. Mahimahi's DualPI2.
-
-*This tool performs:*
+This tool performs:
 
 DTW-based similarity analysis
 Queue-behavior clustering
@@ -24,7 +23,7 @@ mahimahi_validation/
 ├── setup.sh
 └── README.md
 
-**STEP 1 — Generate Test Runs**
+STEP 1 — Generate Test Runs
 Inside your Mahimahi project directory:
 bash./setup.sh
 ./many_runs.sh
@@ -34,14 +33,14 @@ bash./setup.sh
 ./many_runs.sh
 This creates: qdisc_0.log, qdisc_1.log, ... (Kernel)
 
-**STEP 2 — Copy Results Into This Repo**
+STEP 2 — Copy Results Into This Repo
 Place Mahimahi results into:
 mahimahi_logs/
 Place Linux kernel qdisc logs into:
 qdisc_logs/
 These folders ignore contents but remain in git.
 
-**STEP 3 — Start the Validation Console**
+STEP 3 — Start the Validation Console
 bashcd dashboard
 python3 main.py
 You will see:
