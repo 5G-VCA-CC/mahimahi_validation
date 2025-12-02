@@ -1,3 +1,6 @@
 venv
 mahimahi_logs/*
+!mahimahi_logs/.gitkeep
+
 qdisc_logs/*
+!qdisc_logs/.gitkeep
