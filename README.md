@@ -51,7 +51,7 @@ mahimahi_validation/
 │   └── Debugging utility for inspecting graph / trace shapes
 │
 └── README.md
-
+```
 
 ### Running the Experiment
 
