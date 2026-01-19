@@ -1,42 +1,57 @@
-**mahimahi_validation**
+# Mahimahi Validation Framework
 
-### Folder Structure**
+A structured experimental and validation framework for comparing **Mahimahi-based network emulation** against **native Linux kernel qdisc behavior**, supporting single-flow and dual-flow experiments with reproducible setup, logging, and statistical validation.
 
+---
+
+## 📁 Project Structure
+
+```text
 mahimahi_validation/
-│
 ├── dashboard/
-│   ├── main.py                    # Main validation console
-│   ├── validation_steps/          # Parser + permutation test
-│   └── validation_visuals/        # Clustering + visual tools
+│   ├── main.py
+│   │   └── Main validation console / entry point
+│   │
+│   ├── validation_steps/
+│   │   └── Parsers, permutation tests, and statistical validation logic
+│   │
+│   └── validation_visuals/
+│       └── Clustering, plotting, and visual analysis tools
 │
-├── mahimahi_logs/                 # Mahimahi output_*.txt
-├── qdisc_logs/                    # Linux qdisc_*.log
+├── mahimahi_logs/
+│   └── Mahimahi output logs (output_*.txt)
+│
+├── qdisc_logs/
+│   └── Linux kernel qdisc logs (qdisc_*.log)
 │
 ├── scripts/
 │   ├── mahimahi/
 │   │   ├── single/
-│   │   │   ├── setup.sh           # REQUIRED: CPU shielding, cset, env prep
-│   │   │   ├── config.yaml        # Experiment parameters
-│   │   │   └── run.sh             # Executes single-flow Mahimahi experiment
+│   │   │   ├── setup.sh        # CPU shielding, cset isolation, env prep (REQUIRED)
+│   │   │   ├── config.yaml     # Experiment parameters
+│   │   │   └── run.sh          # Execute single-flow Mahimahi experiment
 │   │   │
 │   │   └── duo/
-│   │       ├── setup.sh           # REQUIRED: CPU shielding, cset, env prep
-│   │       ├── config.yaml.       
-│   │       └── run.sh             # Executes dual-flow Mahimahi experiment
+│   │       ├── setup.sh        # CPU shielding, cset isolation, env prep (REQUIRED)
+│   │       ├── config.yaml     # Experiment parameters
+│   │       └── run.sh          # Execute dual-flow Mahimahi experiment
 │   │
 │   └── kernel/
 │       ├── single/
-│       │   ├── setup.sh           # REQUIRED: qdisc + namespace + CPU setup
-│       │   ├── config.yaml
-│       │   └── run.sh             # Executes single-flow kernel/qdisc experiment
+│       │   ├── setup.sh        # qdisc, namespace, CPU setup (REQUIRED)
+│       │   ├── config.yaml     # Experiment parameters
+│       │   └── run.sh          # Execute single-flow kernel/qdisc experiment
 │       │
 │       └── duo/
-│           ├── setup.sh           # REQUIRED: qdisc + namespace + CPU setup
-│           ├── config.yaml
-│           └── run.sh             # Executes dual-flow kernel/qdisc experiment
+│           ├── setup.sh        # qdisc, namespace, CPU setup (REQUIRED)
+│           ├── config.yaml     # Experiment parameters
+│           └── run.sh          # Execute dual-flow kernel/qdisc experiment
+│
+├── graph.py
+│   └── Debugging utility for inspecting graph / trace shapes
 │
 └── README.md
-|__ graph.py # just a debugging file to check graph shape
+
 
 ### Running the Experiment
 
