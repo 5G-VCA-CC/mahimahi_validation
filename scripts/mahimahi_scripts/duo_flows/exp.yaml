@@ -1,0 +1,38 @@
+# exp_duo.yaml
+# Configuration for DUO (L4S + Classic) experiment
+
+output_dir: ./outputs
+
+secs_per_run: 25
+num_runs: 5
+
+# cpu shielding
+housekeeping: "0-3"
+experiment_cpus: "4-7"
+
+cores:
+  mahi_core: 7
+  server_core: 5
+  l4s_client_core: 6
+  classic_client_core: 4
+
+traces:
+  up: ../traces/Constant.up
+  down: ../traces/Constant.down
+
+queue:
+  type: dualPI2
+  packets: 200
+  target: 1
+  tupdate: 16
+  alpha: 0.16
+  beta: 3
+
+flow:
+  rate: "12M"
+  packet_len: 1200
+  base_port: 5300
+
+  # ECN / TOS values
+  l4s_tos: 1        # ECT(1) → L4S
+  classic_tos: 0    # Non-ECN classic (use 2 for ECT(0))
