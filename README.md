@@ -61,10 +61,10 @@ Run The chmod then ./setup.sh first before running.
 
 Specify flow parameters and CPU isolation settings in the YAML configuration file.
 
-!NOTE  
-- Your CPU must have **at least 4 threads** for **classic-only** experiments and **at least 6 threads** for **dual-flow** experiments.  
-- Any cores may be selected, but **do not choose cores running critical system tasks**.  
-- CPU shielding will **evict all existing tasks** from the selected cores; the experiment will **error if tasks cannot be migrated** (e.g., pinned kernel threads or insufficient housekeeping cores).
+> [!NOTE]
+> - Your CPU must have **at least 4 threads** for **classic-only** experiments and **at least 6 threads** for **dual-flow** experiments.  
+> - Any cores may be selected, but **do not choose cores running critical system tasks**.  
+> - CPU shielding will **evict all existing tasks** from the selected cores; the experiment will **error if tasks cannot be migrated** (e.g., pinned kernel threads or insufficient housekeeping cores).
 
 Lastly, run the SHIELD_SINGLE.sh or SHIELD_DUO.sh. Remember, the flows stack based on the next missing number. So if you already have output_20, the next one will be output_21. 
 
