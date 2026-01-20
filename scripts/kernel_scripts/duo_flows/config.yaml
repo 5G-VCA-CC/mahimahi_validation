@@ -1,0 +1,46 @@
+# config.yaml (for the updated cset-based run_many_qdisc_yaml.bash)
+
+runs:
+  secs_per_run: 20
+  num_runs: 5
+  warmup_sec: 2
+  cooldown_sec: 3
+
+net:
+  ns_s: ns_s
+  ns_r: ns_r
+  veth_dev: veth-s
+  dst_ip: 172.20.1.2
+  port: 5202
+
+qdisc:
+  rate: 12mbit
+  burst: 15k
+  target: 1ms
+  tupdate: 16ms
+  limit: 15040000
+  alpha: 0.16
+  beta: 3.2
+
+iperf:
+  # Keep true for fixed-rate UDP (non-reactive). Set false for TCP experiments.
+  udp: true
+  bandwidth: 12M
+  datagram_len: 1200
+  flow: l4s   # l4s | classic
+
+logging:
+  dir: ./tmp
+  sample_sec: 0.016
+  timeout_extra: 12
+
+cpu:
+  housekeeping: "0-3"
+  experiment: "4-7"
+
+  # These MUST be within cpu.experiment
+  sender_core: 4
+  receiver_core: 5
+
+  # Logger can be housekeeping or experiment; you set housekeeping=0-3 so 3 is fine.
+  logger_core: 3

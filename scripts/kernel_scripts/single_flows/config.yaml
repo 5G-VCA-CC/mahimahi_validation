@@ -1,0 +1,53 @@
+# duo_config.yaml (for run_duo_qdisc_yaml.bash)
+#
+# Two flows:
+#   - L4S: ECT(1) via --tos 0x01
+#   - Classic: Not-ECT via --tos 0x00
+#
+# Both are set to 12M as requested.
+
+runs:
+  secs_per_run: 20
+  num_runs: 5
+  warmup_sec: 2
+  cooldown_sec: 3
+
+net:
+  ns_s: ns_s
+  ns_r: ns_r
+  veth_dev: veth-s
+  dst_ip: 172.20.1.2
+  port_l4s: 5202
+  port_classic: 5203
+
+qdisc:
+  rate: 12mbit
+  burst: 15k
+  target: 1ms
+  tupdate: 16ms
+  limit: 15040000
+  alpha: 0.16
+  beta: 3.2
+
+iperf:
+  udp: true
+  l4s_bandwidth: 12M
+  classic_bandwidth: 12M
+  datagram_len: 1200
+
+logging:
+  dir: ./tmp
+  sample_sec: 0.016
+  timeout_extra: 12
+
+cpu:
+  housekeeping: "0-3"
+  experiment: "4-7"
+
+  # Must be within experiment CPUs
+  l4s_sender_core: 6
+  classic_sender_core: 4
+  receiver_core: 5
+
+  # Can be housekeeping or experiment; 3 is housekeeping here.
+  logger_core: 3
