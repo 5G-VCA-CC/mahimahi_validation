@@ -6,14 +6,16 @@ import matplotlib.pyplot as plt
 
 
 class DTWAnalyzer:
-    def __init__(self, qdisc_dir, mahi_dir, cache_file, mode="bytes"):
+    BACKLOG_RE = re.compile(r"\bbacklog\s+(\d+)b\s+(\d+)p\b")
+
+    def __init__(self, qdisc_dir, mahi_dir, cache_file, mode="packets"):
         """
         mode = "bytes" or "packets"
         """
         self.qdisc_dir = Path(qdisc_dir)
         self.mahi_dir = Path(mahi_dir)
         self.cache_file = Path(cache_file)
-        self.mode = mode  # <---- new
+        self.mode = mode
         self.num_processes = max(1, cpu_count() - 1)
 
         # results
@@ -25,6 +27,27 @@ class DTWAnalyzer:
         self.cross_dist = {}
         self.qdisc_dist = {}
         self.mahi_dist = {}
+
+        # parsed-series caches (avoid quadratic file rereads)
+        self._qdisc_series_cache = {}
+        self._mahi_series_cache = {}
+
+        # file lists (avoid repeated glob/sort)
+        self._qdisc_files = None
+        self._mahi_files = None
+
+    # ===============================================================
+    # FILE LIST HELPERS
+    # ===============================================================
+    def _get_qdisc_files(self):
+        if self._qdisc_files is None:
+            self._qdisc_files = sorted(self.qdisc_dir.glob("qdisc_*.log"))
+        return self._qdisc_files
+
+    def _get_mahi_files(self):
+        if self._mahi_files is None:
+            self._mahi_files = sorted(self.mahi_dir.glob("output_*.txt"))
+        return self._mahi_files
 
     # ===============================================================
     # CACHE LOADING
@@ -62,47 +85,50 @@ class DTWAnalyzer:
 
     # ===============================================================
     # QDISC PARSERS
+    # (updated to pick 2nd backlog per block if present; else 1st)
     # ===============================================================
     @staticmethod
     def _read_qdisc_bytes(path: Path):
-        """
-        backlog 1234b 56p requeues 0  -> returns [1234, ...]
-        """
         ys = []
-        pending = False
+        block_vals = []
 
         with open(path, "r", errors="ignore") as f:
             for line in f:
                 if re.match(r"^------ .+ ------\s*$", line):
-                    pending = True
+                    if block_vals:
+                        ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
+                    block_vals = []
                     continue
 
-                if pending:
-                    m = re.search(r"backlog\s+(\d+)b\s+(\d+)p", line)
-                    if m:
-                        ys.append(int(m.group(1)))  # bytes
-                        pending = False
+                m = DTWAnalyzer.BACKLOG_RE.search(line)
+                if m:
+                    block_vals.append(int(m.group(1)))  # bytes
+
+        if block_vals:
+            ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
+
         return ys
 
     @staticmethod
     def _read_qdisc_packets(path: Path):
-        """
-        backlog 1234b 56p requeues 0 -> returns [56, ...]
-        """
         ys = []
-        pending = False
+        block_vals = []
 
         with open(path, "r", errors="ignore") as f:
             for line in f:
                 if re.match(r"^------ .+ ------\s*$", line):
-                    pending = True
+                    if block_vals:
+                        ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
+                    block_vals = []
                     continue
 
-                if pending:
-                    m = re.search(r"backlog\s+(\d+)b\s+(\d+)p", line)
-                    if m:
-                        ys.append(int(m.group(2)))  # packets
-                        pending = False
+                m = DTWAnalyzer.BACKLOG_RE.search(line)
+                if m:
+                    block_vals.append(int(m.group(2)))  # packets
+
+        if block_vals:
+            ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
+
         return ys
 
     # ===============================================================
@@ -134,20 +160,25 @@ class DTWAnalyzer:
 
     # ===============================================================
     # UNIVERSAL READERS (switch based on mode)
+    # + per-file memoization to avoid quadratic file rereads
     # ===============================================================
     def read_qdisc_series(self, path: Path):
-        return (
-            self._read_qdisc_packets(path)
-            if self.mode == "packets"
-            else self._read_qdisc_bytes(path)
-        )
+        key = (str(path), self.mode)
+        if key in self._qdisc_series_cache:
+            return self._qdisc_series_cache[key]
+
+        ys = self._read_qdisc_packets(path) if self.mode == "packets" else self._read_qdisc_bytes(path)
+        self._qdisc_series_cache[key] = ys
+        return ys
 
     def read_mahi_series(self, path: Path):
-        return (
-            self._read_mahi_packets(path)
-            if self.mode == "packets"
-            else self._read_mahi_bytes(path)
-        )
+        key = (str(path), self.mode)
+        if key in self._mahi_series_cache:
+            return self._mahi_series_cache[key]
+
+        ys = self._read_mahi_packets(path) if self.mode == "packets" else self._read_mahi_bytes(path)
+        self._mahi_series_cache[key] = ys
+        return ys
 
     # ===============================================================
     # DTW
@@ -175,7 +206,7 @@ class DTWAnalyzer:
         return prev[m]
 
     # ===============================================================
-    # WORKERS
+    # WORKERS (use in-worker caches to avoid re-reading same files)
     # ===============================================================
     def _compute_cross_worker(self, pair):
         qi, qf, oi, of = pair
@@ -208,8 +239,8 @@ class DTWAnalyzer:
     # COMPUTE
     # ===============================================================
     def compute_cross(self):
-        qdisc_files = sorted(self.qdisc_dir.glob("qdisc_*.log"))
-        mahi_files  = sorted(self.mahi_dir.glob("output_*.txt"))
+        qdisc_files = self._get_qdisc_files()
+        mahi_files = self._get_mahi_files()
 
         qpairs = [(int(f.stem.split("_")[1]), f) for f in qdisc_files]
         mpairs = [(int(f.stem.split("_")[1]), f) for f in mahi_files]
@@ -226,7 +257,7 @@ class DTWAnalyzer:
             self.cross_dist.setdefault(a, {})[b] = d
 
     def compute_qdisc_internal(self):
-        qdisc_files = sorted(self.qdisc_dir.glob("qdisc_*.log"))
+        qdisc_files = self._get_qdisc_files()
         qpairs = [(int(f.stem.split("_")[1]), f) for f in qdisc_files]
 
         jobs = []
@@ -248,7 +279,7 @@ class DTWAnalyzer:
             self.qdisc_dist.setdefault(b, {})[a] = d
 
     def compute_mahi_internal(self):
-        mahi_files = sorted(self.mahi_dir.glob("output_*.txt"))
+        mahi_files = self._get_mahi_files()
         mpairs = [(int(f.stem.split("_")[1]), f) for f in mahi_files]
 
         jobs = []
@@ -297,13 +328,13 @@ class DTWAnalyzer:
 
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-        axes[0].hist(qvals, bins=30, color="skyblue", edgecolor="black")
+        axes[0].hist(qvals, bins=30, edgecolor="black")
         axes[0].set_title("Qdisc DTW Histogram")
 
-        axes[1].hist(mvals, bins=30, color="salmon", edgecolor="black")
+        axes[1].hist(mvals, bins=30, edgecolor="black")
         axes[1].set_title("Mahimahi DTW Histogram")
 
-        axes[2].hist(cvals, bins=30, color="lightgreen", edgecolor="black")
+        axes[2].hist(cvals, bins=30, edgecolor="black")
         axes[2].set_title("Cross-Mode DTW Histogram")
 
         plt.tight_layout()
@@ -319,14 +350,84 @@ class DTWAnalyzer:
 
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-        axes[0].plot(qvals, [i/len(qvals) for i in range(len(qvals))])
+        if qvals:
+            axes[0].plot(qvals, [i / len(qvals) for i in range(len(qvals))])
         axes[0].set_title("Qdisc DTW CDF")
 
-        axes[1].plot(mvals, [i/len(mvals) for i in range(len(mvals))])
+        if mvals:
+            axes[1].plot(mvals, [i / len(mvals) for i in range(len(mvals))])
         axes[1].set_title("Mahimahi DTW CDF")
 
-        axes[2].plot(cvals, [i/len(cvals) for i in range(len(cvals))])
+        if cvals:
+            axes[2].plot(cvals, [i / len(cvals) for i in range(len(cvals))])
         axes[2].set_title("Cross-Mode DTW CDF")
+
+        plt.tight_layout()
+        return fig
+
+    # ===============================================================
+    # OVERLAID QUEUE PLOTS (Mahimahi vs Linux qdisc)
+    # ===============================================================
+    def plot_overlay_queue_traces(self, dt_ms: int = 16, cutoff_ms: int = 1000, show_legend: bool = False):
+        cutoff_samples = cutoff_ms // dt_ms
+
+        mahi_files = self._get_mahi_files()
+        qdisc_files = self._get_qdisc_files()
+
+        fig, axes = plt.subplots(1, 2, figsize=(18, 5))
+
+        global_ymin = float("inf")
+        global_ymax = float("-inf")
+        global_xmax = 0
+
+        # ---- Mahimahi overlay ----
+        ax = axes[0]
+        for f in mahi_files:
+            y = self.read_mahi_series(f)
+            if len(y) <= cutoff_samples:
+                continue
+            y = y[cutoff_samples:]
+            t_ms = [(i + cutoff_samples) * dt_ms for i in range(len(y))]
+
+            ax.plot(t_ms, y, linewidth=0.6, marker="o", markersize=2, label=f.stem)
+
+            global_ymin = min(global_ymin, min(y))
+            global_ymax = max(global_ymax, max(y))
+            global_xmax = max(global_xmax, t_ms[-1])
+
+        ax.set_title(f"Mahimahi queue vs time (overlay, {self.mode})")
+        ax.set_xlabel("Time (ms)")
+        ax.set_ylabel(f"Queue backlog ({self.mode})")
+        ax.grid(True, alpha=0.2)
+        if show_legend:
+            ax.legend(fontsize=7)
+
+        # ---- Linux qdisc overlay ----
+        ax = axes[1]
+        for f in qdisc_files:
+            y = self.read_qdisc_series(f)
+            if len(y) <= cutoff_samples:
+                continue
+            y = y[cutoff_samples:]
+            t_ms = [(i + cutoff_samples) * dt_ms for i in range(len(y))]
+
+            ax.plot(t_ms, y, linewidth=0.6, marker="o", markersize=2, label=f.stem)
+
+            global_ymin = min(global_ymin, min(y))
+            global_ymax = max(global_ymax, max(y))
+            global_xmax = max(global_xmax, t_ms[-1])
+
+        ax.set_title(f"Linux qdisc queue vs time (overlay, {self.mode})")
+        ax.set_xlabel("Time (ms)")
+        ax.set_ylabel(f"Queue backlog ({self.mode})")
+        ax.grid(True, alpha=0.2)
+        if show_legend:
+            ax.legend(fontsize=7)
+
+        # ---- FORCE SAME AXES ----
+        for ax in axes:
+            ax.set_ylim(global_ymin, global_ymax)
+            ax.set_xlim(0, global_xmax)
 
         plt.tight_layout()
         return fig

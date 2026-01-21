@@ -1,7 +1,6 @@
 from validation_steps.parser import DTWAnalyzer
 from validation_visuals.cluster import Cluster_DTW
 from validation_steps.p_test import ParametricDTWTest
-import os
 
 # Directories
 QDISC_DIR = "../qdisc_logs"
@@ -12,7 +11,7 @@ CACHE_FILE = "./dtw_cache.txt"
 cluster_obj = None
 test_obj = None
 test_results = None
-DTW_MODE = "bytes"         # default
+DTW_MODE = "bytes"  # default
 
 # =============================================================
 # MODULE 1 — PACKETS-IN-QUEUE VALIDATION (Your full DTW pipeline)
@@ -57,6 +56,17 @@ def view_cdfs():
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, CACHE_FILE, mode=DTW_MODE)
     an.load_cache()
     an.plot_triple_cdf().show()
+
+
+def plot_graph_check():
+    """
+    Overlay queue backlog vs time for:
+      - Mahimahi output_*.txt (left)
+      - Linux qdisc qdisc_*.log (right)
+    Uses DTW_MODE ("bytes" or "packets").
+    """
+    an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, CACHE_FILE, mode=DTW_MODE)
+    an.plot_overlay_queue_traces(dt_ms=16, cutoff_ms=1000, show_legend=False).show()
 
 
 def run_cluster():
@@ -175,9 +185,10 @@ def packets_in_queue_menu():
         print("7. Run Parametric Test")
         print("8. View Parametric Test Results")
         print("9. View Parametric Test Graph")
+        print("10. Plot Graph Check (Mahimahi vs Kernel overlay)")  # ✅ NEW
         print("------ MODE SWITCH ------")
-        print("10. Switch to PACKETS mode")
-        print("11. Switch to BYTES mode")
+        print("11. Switch to PACKETS mode")
+        print("12. Switch to BYTES mode")
         print("0. Back to Main Menu")
         print("====================================================")
 
@@ -192,8 +203,9 @@ def packets_in_queue_menu():
         elif choice == "7": run_parametric_test()
         elif choice == "8": view_parametric_results()
         elif choice == "9": view_parametric_graph()
-        elif choice == "10": set_mode_packets()
-        elif choice == "11": set_mode_bytes()
+        elif choice == "10": plot_graph_check()  # ✅ NEW
+        elif choice == "11": set_mode_packets()
+        elif choice == "12": set_mode_bytes()
         elif choice == "0":
             return
         else:
