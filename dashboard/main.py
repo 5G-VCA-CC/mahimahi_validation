@@ -1,6 +1,8 @@
 from validation_steps.parser import DTWAnalyzer
 from validation_visuals.cluster import Cluster_DTW
 from validation_steps.p_test import ParametricDTWTest
+import os
+from pathlib import Path
 
 # Directories
 QDISC_DIR = "../qdisc_logs"
@@ -45,29 +47,38 @@ def build_full_dist(analyzer):
 
     return full
 
+# ============================================================
+# FIGURE OUTPUT DIRECTORY
+# ============================================================
+
+OUT_DIR = Path("./figs")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+def _save_fig(fig, name: str):
+    path = OUT_DIR / name
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    print(f"Saved: {path.resolve()}")
+
+# =============================================================
+# GRAPHING AND ANALYSIS FUNCTIONS
+# =============================================================
 
 def view_histograms():
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, CACHE_FILE, mode=DTW_MODE)
     an.load_cache()
-    an.plot_triple_hist().show()
-
+    fig = an.plot_triple_hist()
+    _save_fig(fig, f"triple_hist_{DTW_MODE}.png")
 
 def view_cdfs():
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, CACHE_FILE, mode=DTW_MODE)
     an.load_cache()
-    an.plot_triple_cdf().show()
-
+    fig = an.plot_triple_cdf()
+    _save_fig(fig, f"triple_cdf_{DTW_MODE}.png")
 
 def plot_graph_check():
-    """
-    Overlay queue backlog vs time for:
-      - Mahimahi output_*.txt (left)
-      - Linux qdisc qdisc_*.log (right)
-    Uses DTW_MODE ("bytes" or "packets").
-    """
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, CACHE_FILE, mode=DTW_MODE)
-    an.plot_overlay_queue_traces(dt_ms=16, cutoff_ms=1000, show_legend=False).show()
-
+    fig = an.plot_overlay_queue_traces(dt_ms=16, cutoff_ms=1000, show_legend=False)
+    _save_fig(fig, f"overlay_{DTW_MODE}.png")
 
 def run_cluster():
     global cluster_obj, DTW_MODE
@@ -137,7 +148,6 @@ def run_parametric_test():
     print(f"Num random ≥ original = {test_results['num_greater']}/{num}")
     print(f"p-value = {test_results['p_value']:.6f}\n")
 
-
 def view_parametric_results():
     if test_results is None:
         print("Run parametric test first.")
@@ -153,7 +163,7 @@ def view_parametric_graph():
     if test_obj is None or test_results is None:
         print("Run the parametric test first.")
         return
-    test_obj.plot()
+    test_obj.plot(show=False, save_path=f"./figs/perm_{DTW_MODE}.png")
 
 
 def set_mode_packets():

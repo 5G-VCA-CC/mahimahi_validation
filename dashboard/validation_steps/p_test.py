@@ -3,7 +3,7 @@ import random
 from multiprocessing import Pool, cpu_count
 from functools import partial
 import matplotlib.pyplot as plt
-
+from pathlib import Path
 
 class ParametricDTWTest:
     """
@@ -80,30 +80,30 @@ class ParametricDTWTest:
     # ---------------------------------------------------------
     # VISUALIZATION
     # ---------------------------------------------------------
-    def plot(self):
+   
+    def plot(self, *, show: bool = False, save_path: str | None = None, dpi: int = 200):
         """
-        Plot histogram + CDF of shuffled means,
-        and show where original mean − epsilon lies.
+        Plot histogram + CDF of shuffled means.
+        - show=False avoids Agg warning in headless runs
+        - save_path saves to disk (recommended for dashboard scripts)
+        Returns: fig
         """
-
         if not hasattr(self, "results"):
             print("You must run the permutation test first.")
-            return
+            return None
 
-        shuffled = np.array(self.results["shuffled_means"])
-        orig = self.results["original_mean"]
-        eps = self.results["epsilon"]    # <--- FIXED
-        p = self.results["p_value"]
-
+        shuffled = np.array(self.results["shuffled_means"], dtype=float)
+        orig = float(self.results["original_mean"])
+        eps = float(self.results["epsilon"])
+        p = float(self.results["p_value"])
         threshold = orig - eps
 
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
         # --------------------------- HISTOGRAM ---------------------------
         ax = axes[0]
-        ax.hist(shuffled, bins=25, alpha=0.7, color="skyblue", edgecolor="black")
-
-        ax.axvline(threshold, color="red", linestyle="--", linewidth=2,
+        ax.hist(shuffled, bins=25, alpha=0.7, edgecolor="black")
+        ax.axvline(threshold, linestyle="--", linewidth=2,
                    label=f"Original − ε = {threshold:.4f}")
 
         ax.set_title("Permutation Test — Histogram")
@@ -116,11 +116,14 @@ class ParametricDTWTest:
         # --------------------------- CDF ---------------------------
         ax = axes[1]
         sorted_vals = np.sort(shuffled)
-        cdf = np.arange(len(sorted_vals)) / (len(sorted_vals) - 1)
 
-        ax.plot(sorted_vals, cdf, color="blue", label="Shuffled CDF")
-        ax.axvline(threshold, color="red", linestyle="--",
-                   label=f"Original − ε = {threshold:.4f}")
+        if len(sorted_vals) <= 1:
+            cdf = np.array([1.0] * len(sorted_vals))
+        else:
+            cdf = np.arange(len(sorted_vals)) / (len(sorted_vals) - 1)
+
+        ax.plot(sorted_vals, cdf, label="Shuffled CDF")
+        ax.axvline(threshold, linestyle="--", label=f"Original − ε = {threshold:.4f}")
 
         ax.set_title("Permutation Test — CDF")
         ax.set_xlabel("Mean DTW")
@@ -128,16 +131,28 @@ class ParametricDTWTest:
         ax.legend()
 
         plt.tight_layout()
-        plt.show()
+
+        if save_path:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            print(f"Saved: {Path(save_path).resolve()}")
+
+        if show:
+            plt.show()
+        else:
+            # prevent figures accumulating in long-running CLI loops
+            plt.close(fig)
 
         # --------------------------- Interpretation -----------------------
         print("\n================ Interpretation ================")
         if p < 0.05:
-            print("SIGNIFICANT DIFFERENCE detected (p < 0.05).")
+            print("STRONG EVIDENCE OF EQUIVALENCE (p < 0.05):\n"
+            "Random mixes rarely produce a smaller DTW.\n"
+            "Mahimahi and Qdisc appear (practical) statistically similar.")
         elif p > 0.95:
-            print("STRONG EVIDENCE OF EQUIVALENCE (p > 0.95):\n"
-                  "Random mixes rarely produce a smaller DTW.\n"
-                  "Mahimahi and Qdisc appear statistically similar.")
+            print("STRONG EVIDENCE OF DIFFERENCE (p > 0.95):\n"
+                  "Random mixes rarely produce a larger DTW.\n"
+                  "Mahimahi and Qdisc appear (practical) statistically different.")
         else:
             print("No statistical evidence of difference or equivalence.")
         print("================================================")

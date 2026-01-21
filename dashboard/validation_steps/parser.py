@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 class DTWAnalyzer:
     BACKLOG_RE = re.compile(r"\bbacklog\s+(\d+)b\s+(\d+)p\b")
+    _ID_AT_END = re.compile(r"_(\d+)$")  # <-- NEW: grab trailing _<number>
 
     def __init__(self, qdisc_dir, mahi_dir, cache_file, mode="packets"):
         """
@@ -41,13 +42,25 @@ class DTWAnalyzer:
     # ===============================================================
     def _get_qdisc_files(self):
         if self._qdisc_files is None:
-            self._qdisc_files = sorted(self.qdisc_dir.glob("qdisc_*.log"))
+            # matches: qdisc_foo.log, qdisc_classic_1.log, qdisc_l4s_run3.log, etc.
+            self._qdisc_files = sorted(self.qdisc_dir.glob("qdisc_*"))
         return self._qdisc_files
 
     def _get_mahi_files(self):
         if self._mahi_files is None:
-            self._mahi_files = sorted(self.mahi_dir.glob("output_*.txt"))
+            # matches: output_1.txt, output_classic_1.txt, output_l4s_run3.txt, etc.
+            self._mahi_files = sorted(self.mahi_dir.glob("output_*"))
         return self._mahi_files
+
+    # ===============================================================
+    # NEW: filename id extractor
+    # expects the stem to end with _<number>, e.g. output_classic_1, qdisc_l4s_12
+    # ===============================================================
+    def _extract_id(self, path: Path) -> int:
+        m = self._ID_AT_END.search(path.stem)
+        if not m:
+            raise ValueError(f"Expected filename to end with _<number>: {path.name}")
+        return int(m.group(1))
 
     # ===============================================================
     # CACHE LOADING
@@ -242,8 +255,9 @@ class DTWAnalyzer:
         qdisc_files = self._get_qdisc_files()
         mahi_files = self._get_mahi_files()
 
-        qpairs = [(int(f.stem.split("_")[1]), f) for f in qdisc_files]
-        mpairs = [(int(f.stem.split("_")[1]), f) for f in mahi_files]
+        # <-- UPDATED: use trailing _<number> id extraction
+        qpairs = [(self._extract_id(f), f) for f in qdisc_files]
+        mpairs = [(self._extract_id(f), f) for f in mahi_files]
 
         jobs = [(qi, qf, oi, of) for (qi, qf), (oi, of) in product(qpairs, mpairs)]
         print(f"Computing {len(jobs)} cross-mode DTW pairs...")
@@ -258,7 +272,9 @@ class DTWAnalyzer:
 
     def compute_qdisc_internal(self):
         qdisc_files = self._get_qdisc_files()
-        qpairs = [(int(f.stem.split("_")[1]), f) for f in qdisc_files]
+
+        # <-- UPDATED
+        qpairs = [(self._extract_id(f), f) for f in qdisc_files]
 
         jobs = []
         for (i, fi) in qpairs:
@@ -280,7 +296,9 @@ class DTWAnalyzer:
 
     def compute_mahi_internal(self):
         mahi_files = self._get_mahi_files()
-        mpairs = [(int(f.stem.split("_")[1]), f) for f in mahi_files]
+
+        # <-- UPDATED
+        mpairs = [(self._extract_id(f), f) for f in mahi_files]
 
         jobs = []
         for (i, fi) in mpairs:
