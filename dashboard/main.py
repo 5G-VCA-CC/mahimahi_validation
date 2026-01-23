@@ -77,6 +77,10 @@ def view_cdfs():
 
 def plot_graph_check():
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, CACHE_FILE, mode=DTW_MODE)
+    print("QDISC_DIR resolved to:", Path(QDISC_DIR).resolve())
+    print("Matched qdisc files:")
+    for p in sorted(Path(QDISC_DIR).glob("qdisc_*")):
+        print("  ", p.name)
     fig = an.plot_overlay_queue_traces(dt_ms=16, cutoff_ms=1000, show_legend=False)
     _save_fig(fig, f"overlay_{DTW_MODE}.png")
 

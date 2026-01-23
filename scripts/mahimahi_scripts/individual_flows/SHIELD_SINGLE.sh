@@ -38,7 +38,7 @@ PY
 }
 
 # --- read config ---
-OUT_DIR="$(yaml_get '.output_dir')"
+OUT_DIR_RAW="$(yaml_get '.output_dir')"
 SECS="$(yaml_get '.secs_per_run')"
 NUM_RUNS="$(yaml_get '.num_runs')"
 
@@ -70,7 +70,12 @@ BASE_PORT="$(yaml_get '.flow.base_port')"
 : "${RATE:=12M}"
 : "${PACKET_LEN:=1200}"
 : "${BASE_PORT:=5300}"
-mkdir -p "$OUT_DIR"
+
+# --- normalize OUT_DIR to absolute + fix permissions for RUN_USER ---
+OUT_DIR="$(realpath -m "$OUT_DIR_RAW")"
+sudo -u "$RUN_USER" mkdir -p "$OUT_DIR"
+chown -R "$RUN_USER:$RUN_USER" "$OUT_DIR" 2>/dev/null || true
+chmod 755 "$OUT_DIR" 2>/dev/null || true
 
 QUEUE_ARGS="packets=${Q_PACKETS},target=${Q_TARGET},tupdate=${Q_TUPDATE},alpha=${Q_ALPHA},beta=${Q_BETA}"
 
@@ -93,15 +98,42 @@ next_index() {
 # map mode -> tos + filename prefix
 FLOW_PREFIX=""
 TOS_VALUE="0"
+IS_L4S="false"
 if [[ "$FLOW_MODE" == "l4s" ]]; then
   FLOW_PREFIX="l4s"
-  TOS_VALUE="$L4S_TOS"
+  TOS_VALUE="$L4S_TOS"   # expect 1 for ECT(1)
+  IS_L4S="true"
 else
   FLOW_PREFIX="classic"
   TOS_VALUE="0"
 fi
 
 START_INDEX="$(next_index "output_${FLOW_PREFIX}_*.txt")"
+
+# --- L4S preflight (root): enable ECN + force Prague if available ---
+ensure_l4s_prague() {
+  echo "[*] L4S preflight: enabling TCP ECN + selecting Prague CC (if available)..."
+
+  sudo sysctl -w net.ipv4.tcp_ecn=1 >/dev/null
+
+  local avail
+  avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+  if ! grep -qw prague <<<"$avail"; then
+    echo "[*] tcp_available_congestion_control does not list 'prague' yet. Trying: modprobe tcp_prague"
+    sudo modprobe tcp_prague 2>/dev/null || true
+    avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+  fi
+
+  if ! grep -qw prague <<<"$avail"; then
+    echo "[!] ERROR: Prague congestion control not available on this kernel."
+    echo "    tcp_available_congestion_control: $avail"
+    exit 2
+  fi
+
+  sudo sysctl -w net.ipv4.tcp_congestion_control=prague >/dev/null
+
+  echo "[*] OK: tcp_ecn=$(sysctl -n net.ipv4.tcp_ecn) tcp_congestion_control=$(sysctl -n net.ipv4.tcp_congestion_control)"
+}
 
 # --- experiment function (RUNS AS ROOT INSIDE SHIELD) ---
 run_mahi_single_root() {
@@ -114,7 +146,6 @@ run_mahi_single_root() {
 
   echo "[*] Cleaning up Mahimahi + iperf (root)..."
 
-  # IMPORTANT: do NOT use pkill -f here (it can match the current bash -lc argv and kill itself)
   pkill -9 -x mm-link 2>/dev/null || true
   pkill -9 -x mm-delay 2>/dev/null || true
   pkill -9 -x iperf3 2>/dev/null || true
@@ -125,8 +156,16 @@ run_mahi_single_root() {
 
   sleep 1
 
+  if [[ "$IS_L4S" == "true" ]]; then
+    ensure_l4s_prague
+  fi
+
   echo "[*] Starting iperf3 server on port $PORT (core $SERVER_CORE)..."
-  taskset -c "$SERVER_CORE" iperf3 -s -p "$PORT" >/dev/null 2>&1 &
+  if [[ "$IS_L4S" == "true" ]]; then
+    taskset -c "$SERVER_CORE" iperf3 -s -p "$PORT" --one-off --interval 1 >/dev/null 2>&1 &
+  else
+    taskset -c "$SERVER_CORE" iperf3 -s -p "$PORT" >/dev/null 2>&1 &
+  fi
   local PID_SRV=$!
 
   sleep 1
@@ -137,19 +176,38 @@ run_mahi_single_root() {
   USER_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
   : "${USER_HOME:=/home/$RUN_USER}"
 
-  # Mahimahi must run NON-ROOT
-  sudo -u "$RUN_USER" env \
-    HOME="$USER_HOME" USER="$RUN_USER" LOGNAME="$RUN_USER" PATH="$PATH" \
+  # Ensure files are writable by the non-root Mahimahi user
+  sudo -u "$RUN_USER" touch "$OUT_FILE" "$FLOW_LOG"
+  chmod 644 "$OUT_FILE" "$FLOW_LOG" 2>/dev/null || true
+
+  # HARD HEADLESS:
+  # - remove --meter-all (often triggers X/xcb)
+  # - run with env -i (no DISPLAY/WAYLAND inherited)
+  sudo -u "$RUN_USER" env -i \
+    HOME="$USER_HOME" USER="$RUN_USER" LOGNAME="$RUN_USER" \
+    PATH="$PATH" \
+    MM_NO_X=1 \
     bash -lc "
       set -euo pipefail
-      taskset -c '$MAHI_CORE' mm-delay 0 mm-link --meter-all \
+
+      echo \"[dbg] DISPLAY=\${DISPLAY-<unset>} WAYLAND_DISPLAY=\${WAYLAND_DISPLAY-<unset>}\"
+
+      taskset -c '$MAHI_CORE' mm-delay 0 mm-link \
         --uplink-queue='$QUEUE_TYPE' \
         --uplink-queue-args='$QUEUE_ARGS' \
         '$TRACE_UP' '$TRACE_DOWN' -- bash -c \"
           echo '[+] Flow: mode=$FLOW_MODE port=$PORT tos=$TOS_VALUE'
-          taskset -c $CLIENT_CORE iperf3 -c 10.0.0.1 -p $PORT -u \
-            -b $RATE -l $PACKET_LEN -t $SECS --tos $TOS_VALUE --interval 1 \
-            2>&1 | tee '$FLOW_LOG'
+
+          if [[ '$IS_L4S' == 'true' ]]; then
+            taskset -c $CLIENT_CORE iperf3 -c 10.0.0.1 -p $PORT \
+              -t $SECS --tos $TOS_VALUE --interval 1 \
+              -C prague \
+              2>&1 | tee '$FLOW_LOG'
+          else
+            taskset -c $CLIENT_CORE iperf3 -c 10.0.0.1 -p $PORT -u \
+              -b $RATE -l $PACKET_LEN -t $SECS --tos $TOS_VALUE --interval 1 \
+              2>&1 | tee '$FLOW_LOG'
+          fi
         \" | tee '$OUT_FILE'
     "
 
@@ -159,6 +217,7 @@ run_mahi_single_root() {
 
 # --- CPU shielding setup (requires root) ---
 echo "[*] Using config: $CFG"
+echo "[*] Output dir: $OUT_DIR"
 echo "[*] Resetting cset..."
 sudo cset shield --reset || true
 
@@ -177,6 +236,7 @@ for r in $(seq 0 $((NUM_RUNS - 1))); do
     export SERVER_CORE='$SERVER_CORE'
     export CLIENT_CORE='$CLIENT_CORE'
     export FLOW_MODE='$FLOW_MODE'
+    export IS_L4S='$IS_L4S'
     export TOS_VALUE='$TOS_VALUE'
     export QUEUE_TYPE='$QUEUE_TYPE'
     export QUEUE_ARGS='$QUEUE_ARGS'
@@ -187,6 +247,7 @@ for r in $(seq 0 $((NUM_RUNS - 1))); do
     export PACKET_LEN='$PACKET_LEN'
     export BASE_PORT='$BASE_PORT'
     export FLOW_PREFIX='$FLOW_PREFIX'
+    $(declare -f ensure_l4s_prague)
     $(declare -f run_mahi_single_root)
     run_mahi_single_root '$SECS' '$idx'
   "

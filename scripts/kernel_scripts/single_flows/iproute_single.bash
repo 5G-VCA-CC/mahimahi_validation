@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Usage: sudo ./run_many_qdisc_yaml.bash config.yaml
-#
-# This version uses cset shielding correctly:
-#   1) shield experiment CPUs (evict other tasks)
-#   2) run the whole experiment inside the shield cpuset via `cset shield --exec`
-#   3) pin server/client/loggers to specific cores with taskset (within the shield)
-
 set -euo pipefail
 
 CFG=${1:-config.yaml}
@@ -21,7 +14,6 @@ yget() {
 import sys
 cfg_path = sys.argv[1]
 expr = sys.argv[2]
-
 try:
   import yaml
 except Exception:
@@ -33,7 +25,7 @@ with open(cfg_path, "r") as f:
 
 cur = data
 for part in expr.split("."):
-  if part not in cur:
+  if not isinstance(cur, dict) or part not in cur:
     print("", end="")
     sys.exit(0)
   cur = cur[part]
@@ -47,9 +39,18 @@ else:
 PY
 }
 
-# --- Read config ---
-SECS="$(yget runs.secs_per_run)"; SECS="${SECS:-20}"
+# --- monotonic-ish timestamp in ns (NO python forks) ---
+mono_ns_uptime() {
+  awk '{printf "%.0f\n", $1*1000000000}' /proc/uptime
+}
+
+# ----------------------------
+# Read config
+# ----------------------------
+SECS_LOG="$(yget runs.secs_per_run)"; SECS_LOG="${SECS_LOG:-30}"
 NUM_RUNS="$(yget runs.num_runs)"; NUM_RUNS="${NUM_RUNS:-1}"
+
+SETUP_SEC="$(yget runs.setup_sec)"; SETUP_SEC="${SETUP_SEC:-3}"
 WARMUP_SEC="$(yget runs.warmup_sec)"; WARMUP_SEC="${WARMUP_SEC:-2}"
 COOLDOWN_SEC="$(yget runs.cooldown_sec)"; COOLDOWN_SEC="${COOLDOWN_SEC:-3}"
 
@@ -57,7 +58,9 @@ NS_S="$(yget net.ns_s)"; NS_S="${NS_S:-ns_s}"
 NS_R="$(yget net.ns_r)"; NS_R="${NS_R:-ns_r}"
 VETH_DEV="$(yget net.veth_dev)"; VETH_DEV="${VETH_DEV:-veth-s}"
 DST_IP="$(yget net.dst_ip)"; DST_IP="${DST_IP:-172.20.1.2}"
-PORT="$(yget net.port)"; PORT="${PORT:-5202}"
+
+# ✅ single port now
+PORT="$(yget net.port)"; PORT="${PORT:-5203}"
 
 RATE="$(yget qdisc.rate)"; RATE="${RATE:-12mbit}"
 BURST="$(yget qdisc.burst)"; BURST="${BURST:-1k}"
@@ -67,45 +70,94 @@ LIMIT="$(yget qdisc.limit)"; LIMIT="${LIMIT:-15040000}"
 ALPHA="$(yget qdisc.alpha)"; ALPHA="${ALPHA:-0.16}"
 BETA="$(yget qdisc.beta)"; BETA="${BETA:-3.2}"
 
-UDP="$(yget iperf.udp)"; UDP="${UDP:-true}"
-BANDWIDTH="$(yget iperf.bandwidth)"; BANDWIDTH="${BANDWIDTH:-12M}"
-DGRAM_LEN="$(yget iperf.datagram_len)"; DGRAM_LEN="${DGRAM_LEN:-1200}"
-FLOW="$(yget iperf.flow)"; FLOW="${FLOW:-classic}"
+# ✅ choose ONE mode: classic | l4s
+FLOW_MODE="$(yget flows.mode)"; FLOW_MODE="${FLOW_MODE:-l4s}"
+
+# classic (UDP)
+CLASSIC_BW="$(yget flows.classic.bandwidth)"; CLASSIC_BW="${CLASSIC_BW:-12M}"
+CLASSIC_DGRAM_LEN="$(yget flows.classic.datagram_len)"; CLASSIC_DGRAM_LEN="${CLASSIC_DGRAM_LEN:-1200}"
+TOS_CLASSIC="$(yget flows.classic.tos)"; TOS_CLASSIC="${TOS_CLASSIC:-0x00}"
+
+# l4s (TCP)
+L4S_PARALLEL="$(yget flows.l4s.parallel)"; L4S_PARALLEL="${L4S_PARALLEL:-1}"
+TOS_L4S="$(yget flows.l4s.tos)"; TOS_L4S="${TOS_L4S:-0x01}"
 
 LOG_DIR="$(yget logging.dir)"; LOG_DIR="${LOG_DIR:-./tmp}"
 SAMPLE_SEC="$(yget logging.sample_sec)"; SAMPLE_SEC="${SAMPLE_SEC:-0.016}"
+QDISC_SAMPLE_SEC="$(yget logging.qdisc_sample_sec)"; QDISC_SAMPLE_SEC="${QDISC_SAMPLE_SEC:-$SAMPLE_SEC}"
 TIMEOUT_EXTRA="$(yget logging.timeout_extra)"; TIMEOUT_EXTRA="${TIMEOUT_EXTRA:-12}"
 
 HOUSEKEEPING="$(yget cpu.housekeeping)"; HOUSEKEEPING="${HOUSEKEEPING:-0-3}"
 EXPERIMENT_CPUS="$(yget cpu.experiment)"; EXPERIMENT_CPUS="${EXPERIMENT_CPUS:-4-7}"
+
+# ✅ single sender/receiver pair now
 SENDER_CORE="$(yget cpu.sender_core)"; SENDER_CORE="${SENDER_CORE:-4}"
 RECEIVER_CORE="$(yget cpu.receiver_core)"; RECEIVER_CORE="${RECEIVER_CORE:-5}"
+
 LOGGER_CORE="$(yget cpu.logger_core)"; LOGGER_CORE="${LOGGER_CORE:-3}"
 
-mkdir -p "$LOG_DIR"
-
-if (( SECS <= WARMUP_SEC )); then
-  echo "Error: secs_per_run must be > warmup_sec (SECS=$SECS, WARMUP_SEC=$WARMUP_SEC)"
+if (( SECS_LOG <= 0 )); then
+  echo "Error: runs.secs_per_run must be > 0 (got $SECS_LOG)"
   exit 1
 fi
 
-LOG_TIME=$(( (SECS - WARMUP_SEC) + TIMEOUT_EXTRA ))
+SECS_IPERF=$(( WARMUP_SEC + SECS_LOG ))
+LOG_TIME=$(( SECS_LOG + TIMEOUT_EXTRA ))
 
-# --- Flow marking via ECN bits in DS field (lowest 2 bits) ---
-# classic: Not-ECT (00) => 0x00
-# l4s:     ECT(1)  (01) => 0x01
-case "$FLOW" in
-  classic) TOS_HEX="0x00" ;;
-  l4s)     TOS_HEX="0x01" ;;
-  *)
-    echo "Error: iperf.flow must be 'classic' or 'l4s' (got '$FLOW')"
-    exit 1
-    ;;
-esac
+# Make LOG_DIR absolute + writable
+LOG_DIR="$(realpath -m "$LOG_DIR")"
+sudo mkdir -p "$LOG_DIR"
+sudo chmod 777 "$LOG_DIR"
+
+# ----------------------------
+# ORIGINAL SETUP (netns + veth + IPs + offloads)
+# ----------------------------
+original_setup() {
+  sudo ip netns add "$NS_S" 2>/dev/null || true
+  sudo ip netns add "$NS_R" 2>/dev/null || true
+
+  # recreate veth cleanly
+  sudo ip -n "$NS_S" link del veth-s 2>/dev/null || true
+  sudo ip -n "$NS_R" link del veth-r 2>/dev/null || true
+  sudo ip link del veth-s 2>/dev/null || true
+  sudo ip link del veth-r 2>/dev/null || true
+
+  sudo ip link add veth-s type veth peer name veth-r
+  sudo ip link set veth-s netns "$NS_S"
+  sudo ip link set veth-r netns "$NS_R"
+
+  sudo ip netns exec "$NS_S" ip addr add 172.20.1.1/30 dev veth-s
+  sudo ip netns exec "$NS_R" ip addr add 172.20.1.2/30 dev veth-r
+
+  sudo ip netns exec "$NS_S" ip link set lo up
+  sudo ip netns exec "$NS_R" ip link set lo up
+  sudo ip netns exec "$NS_S" ip link set veth-s up
+  sudo ip netns exec "$NS_R" ip link set veth-r up
+
+  # disable offloads
+  sudo ip netns exec "$NS_S" ethtool -K veth-s tso off gso off gro off lro off 2>/dev/null || true
+  sudo ip netns exec "$NS_R" ethtool -K veth-r tso off gso off gro off lro off 2>/dev/null || true
+}
+
+# ----------------------------
+# Enable L4S Prague in BOTH namespaces (only when FLOW_MODE=l4s)
+# ----------------------------
+enable_l4s_prague_in_both_namespaces() {
+  sudo modprobe tcp_prague 2>/dev/null || true
+
+  sudo ip netns exec "$NS_S" sysctl -w net.ipv4.tcp_ecn=1 >/dev/null
+  sudo ip netns exec "$NS_R" sysctl -w net.ipv4.tcp_ecn=1 >/dev/null
+
+  sudo ip netns exec "$NS_S" sysctl -w net.ipv4.tcp_congestion_control=prague >/dev/null
+  sudo ip netns exec "$NS_R" sysctl -w net.ipv4.tcp_congestion_control=prague >/dev/null
+
+  echo "[*] ns_s tcp_ecn=$(sudo ip netns exec "$NS_S" sysctl -n net.ipv4.tcp_ecn) tcp_cc=$(sudo ip netns exec "$NS_S" sysctl -n net.ipv4.tcp_congestion_control)"
+  echo "[*] ns_r tcp_ecn=$(sudo ip netns exec "$NS_R" sysctl -n net.ipv4.tcp_ecn) tcp_cc=$(sudo ip netns exec "$NS_R" sysctl -n net.ipv4.tcp_congestion_control)"
+}
 
 next_free_idx() {
   local i=0
-  while [[ -e "$LOG_DIR/qdisc_${i}.log" || -e "$LOG_DIR/ss_${i}.log" ]]; do
+  while [[ -e "$LOG_DIR/qdisc_${i}.log" ]]; do
     ((i++))
   done
   echo "$i"
@@ -120,89 +172,170 @@ cleanup_run() {
   ip netns exec "$NS_R" pkill -9 iperf3 2>/dev/null || true
 }
 
-# Runs a command inside a namespace pinned to a core
-run_pinned_ns() {
-  local ns="$1"; shift
-  local core="$1"; shift
-  ip netns exec "$ns" taskset -c "$core" "$@"
+start_qdisc_logger_housekeeping() {
+  local idx="$1"
+  local qdisc_log="$LOG_DIR/qdisc_${idx}.log"
+
+  echo "📊 Logging qdisc to $qdisc_log (core $LOGGER_CORE) for ${SECS_LOG}s (dt=${QDISC_SAMPLE_SEC})..."
+  (
+    taskset -c "$LOGGER_CORE" timeout "${LOG_TIME}s" bash -eu -o pipefail <<EOF
+NS_S="$NS_S"
+VETH_DEV="$VETH_DEV"
+QDISC_LOG="$qdisc_log"
+SECS_LOG="$SECS_LOG"
+QDISC_SAMPLE_SEC="$QDISC_SAMPLE_SEC"
+mono_ns_uptime() { awk '{printf "%.0f\n", \$1*1000000000}' /proc/uptime; }
+start=\$(mono_ns_uptime)
+end=\$(( start + SECS_LOG*1000000000 ))
+while :; do
+  now=\$(mono_ns_uptime)
+  (( now >= end )) && break
+  sleep "\$QDISC_SAMPLE_SEC"
+  {
+    echo "TS_NS \$now"
+    ip netns exec "\$NS_S" tc -s qdisc show dev "\$VETH_DEV"
+  } >> "\$QDISC_LOG"
+done
+EOF
+  ) & echo $!
 }
 
-run_once_root() {
-  local IDX="$1"
+run_single_flow_in_shield() {
+  local idx="$1"
 
-  local QDISC_LOG="$LOG_DIR/qdisc_${IDX}.log"
-  local SS_LOG="$LOG_DIR/ss_${IDX}.log"
+  sudo cset shield --exec -- bash -lc "
+    set -euo pipefail
+
+    NS_S='$NS_S'
+    NS_R='$NS_R'
+    VETH_DEV='$VETH_DEV'
+    DST_IP='$DST_IP'
+    PORT='$PORT'
+
+    RATE='$RATE'
+    BURST='$BURST'
+    TARGET='$TARGET'
+    TUPDATE='$TUPDATE'
+    LIMIT='$LIMIT'
+    ALPHA='$ALPHA'
+    BETA='$BETA'
+
+    FLOW_MODE='$FLOW_MODE'
+    SECS_IPERF='$SECS_IPERF'
+    SETUP_SEC='$SETUP_SEC'
+
+    CLASSIC_BW='$CLASSIC_BW'
+    CLASSIC_DGRAM_LEN='$CLASSIC_DGRAM_LEN'
+    TOS_CLASSIC='$TOS_CLASSIC'
+
+    L4S_PARALLEL='$L4S_PARALLEL'
+    TOS_L4S='$TOS_L4S'
+
+    SENDER_CORE='$SENDER_CORE'
+    RECEIVER_CORE='$RECEIVER_CORE'
+
+    LOG_DIR='$LOG_DIR'
+    IDX='$idx'
+
+    run_pinned_ns() {
+      local ns=\"\$1\"; shift
+      local core=\"\$1\"; shift
+      ip netns exec \"\$ns\" taskset -c \"\$core\" \"\$@\"
+    }
+
+    $(declare -f original_setup)
+    $(declare -f enable_l4s_prague_in_both_namespaces)
+
+    original_setup
+    if [[ \"\$FLOW_MODE\" == \"l4s\" ]]; then
+      enable_l4s_prague_in_both_namespaces
+    fi
+
+    mkdir -p \"\$LOG_DIR\"
+    rm -f \"\$LOG_DIR/run_\${IDX}.started\" 2>/dev/null || true
+
+    ip netns exec \"\$NS_S\" pkill -9 iperf3 2>/dev/null || true
+    ip netns exec \"\$NS_R\" pkill -9 iperf3 2>/dev/null || true
+
+    echo \"🔁 Resetting qdisc on \$VETH_DEV...\"
+    ip netns exec \"\$NS_S\" tc qdisc del dev \"\$VETH_DEV\" root 2>/dev/null || true
+    ip netns exec \"\$NS_S\" tc qdisc add dev \"\$VETH_DEV\" root handle 1: htb default 10
+    ip netns exec \"\$NS_S\" tc class add dev \"\$VETH_DEV\" parent 1: classid 1:10 htb \
+      rate \"\$RATE\" ceil \"\$RATE\" burst \"\$BURST\"
+    ip netns exec \"\$NS_S\" tc qdisc add dev \"\$VETH_DEV\" parent 1:10 handle 2: dualpi2 \
+      target \"\$TARGET\" tupdate \"\$TUPDATE\" limit \"\$LIMIT\" alpha \"\$ALPHA\" beta \"\$BETA\"
+
+    echo \"📡 Starting iperf3 server in \$NS_R (port \$PORT)...\"
+    run_pinned_ns \"\$NS_R\" \"\$RECEIVER_CORE\" iperf3 -s -p \"\$PORT\" >/dev/null 2>&1 &
+    srv=\$!
+
+    sleep 1
+    echo \"🧰 Setup delay \${SETUP_SEC}s...\"
+    sleep \"\$SETUP_SEC\"
+
+    echo \"🚀 Starting client (mode=\$FLOW_MODE) for \${SECS_IPERF}s...\"
+    if [[ \"\$FLOW_MODE\" == \"classic\" ]]; then
+      run_pinned_ns \"\$NS_S\" \"\$SENDER_CORE\" iperf3 -c \"\$DST_IP\" -p \"\$PORT\" -u \
+        -b \"\$CLASSIC_BW\" -l \"\$CLASSIC_DGRAM_LEN\" -t \"\$SECS_IPERF\" --tos \"\$TOS_CLASSIC\" >/dev/null 2>&1 &
+    else
+      run_pinned_ns \"\$NS_S\" \"\$SENDER_CORE\" iperf3 -c \"\$DST_IP\" -p \"\$PORT\" \
+        -t \"\$SECS_IPERF\" -P \"\$L4S_PARALLEL\" -C prague --tos \"\$TOS_L4S\" >/dev/null 2>&1 &
+    fi
+    cli=\$!
+    touch \"\$LOG_DIR/run_\${IDX}.started\"
+
+    wait \"\$cli\" 2>/dev/null || true
+    kill \"\$srv\" >/dev/null 2>&1 || true
+    ip netns exec \"\$NS_S\" pkill -9 iperf3 2>/dev/null || true
+    ip netns exec \"\$NS_R\" pkill -9 iperf3 2>/dev/null || true
+  "
+}
+
+run_once() {
+  local idx="$1"
+  local qdisc_log="$LOG_DIR/qdisc_${idx}.log"
+  local marker="$LOG_DIR/run_${idx}.started"
 
   echo
-  echo "[*] === Run #$IDX for ${SECS}s (warmup ${WARMUP_SEC}s not logged) ==="
-  echo "[*] rate=$RATE burst=$BURST target=$TARGET tupdate=$TUPDATE flow=$FLOW tos=$TOS_HEX udp=$UDP"
-  echo "[*] sender_core=$SENDER_CORE receiver_core=$RECEIVER_CORE logger_core=$LOGGER_CORE"
-  echo "[*] Logs: $QDISC_LOG | $SS_LOG"
+  echo "[*] === Run #$idx (SINGLE flow: $FLOW_MODE) ==="
+  echo "[*] setup_sec=${SETUP_SEC}s, warmup_sec=${WARMUP_SEC}s, LOGGED=${SECS_LOG}s, iperf_total=${SECS_IPERF}s"
+  echo "[*] qdisc rate=$RATE target=$TARGET tupdate=$TUPDATE"
+  echo "[*] mode=$FLOW_MODE port=$PORT sender_core=$SENDER_CORE receiver_core=$RECEIVER_CORE"
+  echo "[*] Log: $qdisc_log"
+  echo "[*] Logger dt: qdisc=${QDISC_SAMPLE_SEC}s"
 
-  # Sanity: show cpuset allowed list for this runner
-  # echo "[*] Allowed CPUs: $(grep Cpus_allowed_list /proc/self/status | awk '{print $2}')"
+  rm -f "$marker" 2>/dev/null || true
 
-  echo "🔁 Resetting qdisc on $VETH_DEV..."
-  ip netns exec "$NS_S" tc qdisc del dev "$VETH_DEV" root 2>/dev/null || true
-  ip netns exec "$NS_S" tc qdisc add dev "$VETH_DEV" root handle 1: htb default 10
-  ip netns exec "$NS_S" tc class add dev "$VETH_DEV" parent 1: classid 1:10 htb \
-    rate "$RATE" ceil "$RATE" burst "$BURST"
+  run_single_flow_in_shield "$idx" &
+  local EXP_PID=$!
 
-  ip netns exec "$NS_S" tc qdisc add dev "$VETH_DEV" parent 1:10 handle 2: dualpi2 \
-    target "$TARGET" tupdate "$TUPDATE" limit "$LIMIT" alpha "$ALPHA" beta "$BETA"
-
-  echo "📡 Starting iperf3 server in $NS_R (core $RECEIVER_CORE)..."
-  run_pinned_ns "$NS_R" "$RECEIVER_CORE" iperf3 -s -p "$PORT" >/dev/null 2>&1 &
-  local SERVER_PID=$!
-
-  sleep 1
-
-  echo "🚀 Starting iperf3 client in $NS_S (core $SENDER_CORE) for ${SECS}s..."
-  if [[ "$UDP" == "true" ]]; then
-    run_pinned_ns "$NS_S" "$SENDER_CORE" iperf3 -c "$DST_IP" -p "$PORT" -u \
-      -b "$BANDWIDTH" -l "$DGRAM_LEN" -t "$SECS" --tos "$TOS_HEX" >/dev/null 2>&1 &
-  else
-    run_pinned_ns "$NS_S" "$SENDER_CORE" iperf3 -c "$DST_IP" -p "$PORT" \
-      -t "$SECS" --tos "$TOS_HEX" >/dev/null 2>&1 &
+  echo "⏳ Waiting for client start marker..."
+  if ! timeout 10 bash -lc "while [[ ! -f '$marker' ]]; do sleep 0.01; done"; then
+    echo "Error: client marker never appeared (iperf failed to start?)"
+    cleanup_run
+    return 1
   fi
-  local CLIENT_PID=$!
 
-  echo "⏳ Warmup ${WARMUP_SEC}s (not logging)..."
-  sleep "$WARMUP_SEC"
+  if (( WARMUP_SEC > 0 )); then
+    echo "⏳ Warmup ${WARMUP_SEC}s (flow running, not logging)..."
+    sleep "$WARMUP_SEC"
+  fi
 
-  echo "📥 Logging ss to $SS_LOG (core $LOGGER_CORE)..."
-  (
-    taskset -c "$LOGGER_CORE" timeout "${LOG_TIME}s" bash -lc "
-      while sleep $SAMPLE_SEC; do
-        {
-          echo \"------ \$(date) ------\"
-          ip netns exec $NS_S ss -tin dst $DST_IP
-        } >> \"$SS_LOG\"
-      done
-    "
-  ) & local SS_PID=$!
+  echo "▶️  Logging for exactly ${SECS_LOG}s..."
+  local QDISC_PID
+  QDISC_PID="$(start_qdisc_logger_housekeeping "$idx")"
 
-  echo "📊 Logging qdisc stats to $QDISC_LOG (core $LOGGER_CORE)..."
-  (
-    taskset -c "$LOGGER_CORE" timeout "${LOG_TIME}s" bash -lc "
-      while sleep $SAMPLE_SEC; do
-        {
-          echo \"------ \$(date) ------\"
-          ip netns exec $NS_S tc -s qdisc show dev $VETH_DEV
-        } >> \"$QDISC_LOG\"
-      done
-    "
-  ) & local QDISC_PID=$!
+  wait "$EXP_PID" 2>/dev/null || true
 
-  wait "$CLIENT_PID" 2>/dev/null || true
-  sleep 2
+  echo "🛑 Stopping logger and cleaning up..."
+  cleanup_run "$QDISC_PID"
 
-  echo "🛑 Stopping loggers and iperf3..."
-  cleanup_run "$SS_PID" "$QDISC_PID" "$SERVER_PID"
-  echo "✅ Saved: $QDISC_LOG"
+  echo "✅ Saved: $qdisc_log"
 }
 
 echo "[*] Using config: $CFG"
+echo "[*] LOG_DIR=$LOG_DIR"
+echo "[*] FLOW_MODE=$FLOW_MODE (choose via flows.mode in yaml)"
 
 echo "[*] Resetting cset..."
 sudo cset shield --reset >/dev/null 2>&1 || true
@@ -212,45 +345,9 @@ sudo cset shield --cpu="$EXPERIMENT_CPUS" --kthread=on >/dev/null
 
 for ((run=0; run<NUM_RUNS; run++)); do
   IDX="$(next_free_idx)"
-
   echo ""
   echo "[*] ===== RUN index=$IDX ====="
-
-  # Run the whole run_once inside the shield cpuset
-  sudo cset shield --exec -- bash -lc "
-    export SECS='$SECS'
-    export WARMUP_SEC='$WARMUP_SEC'
-    export LOG_TIME='$LOG_TIME'
-    export NS_S='$NS_S'
-    export NS_R='$NS_R'
-    export VETH_DEV='$VETH_DEV'
-    export DST_IP='$DST_IP'
-    export PORT='$PORT'
-    export RATE='$RATE'
-    export BURST='$BURST'
-    export TARGET='$TARGET'
-    export TUPDATE='$TUPDATE'
-    export LIMIT='$LIMIT'
-    export ALPHA='$ALPHA'
-    export BETA='$BETA'
-    export UDP='$UDP'
-    export BANDWIDTH='$BANDWIDTH'
-    export DGRAM_LEN='$DGRAM_LEN'
-    export FLOW='$FLOW'
-    export TOS_HEX='$TOS_HEX'
-    export LOG_DIR='$LOG_DIR'
-    export SAMPLE_SEC='$SAMPLE_SEC'
-    export TIMEOUT_EXTRA='$TIMEOUT_EXTRA'
-    export SENDER_CORE='$SENDER_CORE'
-    export RECEIVER_CORE='$RECEIVER_CORE'
-    export LOGGER_CORE='$LOGGER_CORE'
-    $(declare -f next_free_idx cleanup_run run_pinned_ns run_once_root)
-    # best-effort cleanup between runs
-    ip netns exec '$NS_S' pkill -9 iperf3 2>/dev/null || true
-    ip netns exec '$NS_R' pkill -9 iperf3 2>/dev/null || true
-    run_once_root '$IDX'
-  "
-
+  run_once "$IDX"
   echo "[*] Cooling down ${COOLDOWN_SEC}s..."
   sleep "$COOLDOWN_SEC"
 done

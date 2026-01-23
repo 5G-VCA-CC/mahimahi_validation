@@ -1,9 +1,9 @@
-# exp.yaml
+# exp_duo.yaml
 
 output_dir: ./outputs
 
-secs_per_run: 25
-num_runs: 5
+secs_per_run: 30
+num_runs: 95
 
 # cpu shielding
 housekeeping: "0-3"
@@ -20,15 +20,15 @@ traces:
 
 queue:
   type: dualPI2
-  packets: 200
+  packets: 20000
   target: 1
   tupdate: 16
   alpha: 0.16
   beta: 3
 
 flow:
-  mode: classic # l4s OR classic
-  l4s_tos: 0 # defaults to 1 if omitted, change this to 0 for classic
-  rate: "12M"
-  packet_len: 1200
+  mode: l4s          # "l4s" or "classic"
+  l4s_tos: 1         # ECT(1)
+  rate: "12M"        # only used for classic UDP path in this script
+  packet_len: 1200   # only used for classic UDP path in this script
   base_port: 5300

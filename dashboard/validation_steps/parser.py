@@ -7,7 +7,10 @@ import matplotlib.pyplot as plt
 
 class DTWAnalyzer:
     BACKLOG_RE = re.compile(r"\bbacklog\s+(\d+)b\s+(\d+)p\b")
-    _ID_AT_END = re.compile(r"_(\d+)$")  # <-- NEW: grab trailing _<number>
+    _ID_AT_END = re.compile(r"_(\d+)$")
+
+    # NEW: TS_NS block header (from your updated bash logger)
+    TS_NS_RE = re.compile(r"^TS_NS\s+(\d+)\s*$")
 
     def __init__(self, qdisc_dir, mahi_dir, cache_file, mode="packets"):
         """
@@ -33,6 +36,9 @@ class DTWAnalyzer:
         self._qdisc_series_cache = {}
         self._mahi_series_cache = {}
 
+        # NEW: time-aware qdisc trace cache: (t_ms, y)
+        self._qdisc_trace_cache = {}
+
         # file lists (avoid repeated glob/sort)
         self._qdisc_files = None
         self._mahi_files = None
@@ -53,7 +59,7 @@ class DTWAnalyzer:
         return self._mahi_files
 
     # ===============================================================
-    # NEW: filename id extractor
+    # filename id extractor
     # expects the stem to end with _<number>, e.g. output_classic_1, qdisc_l4s_12
     # ===============================================================
     def _extract_id(self, path: Path) -> int:
@@ -98,10 +104,40 @@ class DTWAnalyzer:
 
     # ===============================================================
     # QDISC PARSERS
-    # (updated to pick 2nd backlog per block if present; else 1st)
+    # - "series" readers for DTW (y only)
+    # - "trace" reader for plotting (t_ms + y) using TS_NS
     # ===============================================================
     @staticmethod
-    def _read_qdisc_bytes(path: Path):
+    def _read_qdisc_packets_legacy(path: Path):
+        """
+        Old format: uses '------ date ------' separators.
+        Kept for backwards compatibility if you still have old logs.
+        """
+        ys = []
+        block_vals = []
+
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                if re.match(r"^------ .+ ------\s*$", line):
+                    if block_vals:
+                        ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
+                    block_vals = []
+                    continue
+
+                m = DTWAnalyzer.BACKLOG_RE.search(line)
+                if m:
+                    block_vals.append(int(m.group(2)))  # packets
+
+        if block_vals:
+            ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
+
+        return ys
+
+    @staticmethod
+    def _read_qdisc_bytes_legacy(path: Path):
+        """
+        Old format: uses '------ date ------' separators.
+        """
         ys = []
         block_vals = []
 
@@ -123,25 +159,100 @@ class DTWAnalyzer:
         return ys
 
     @staticmethod
-    def _read_qdisc_packets(path: Path):
+    def _read_qdisc_trace_tsns(path: Path, mode: str):
+        """
+        New format: each block begins with:
+            TS_NS <monotonic_ns>
+
+        Returns:
+            t_ms: elapsed ms since first TS_NS
+            y:    backlog (packets or bytes)
+        We still pick the 2nd backlog in each block if present (dualpi2 after htb),
+        else the 1st backlog.
+        """
+        t_ms = []
         ys = []
+
+        cur_ts = None
         block_vals = []
+        t0 = None
+
+        def flush():
+            nonlocal cur_ts, block_vals, t0
+            if cur_ts is None:
+                return
+            if not block_vals:
+                return
+
+            val = block_vals[1] if len(block_vals) >= 2 else block_vals[0]
+            if t0 is None:
+                t0 = cur_ts
+            t_ms.append((cur_ts - t0) / 1e6)  # ns -> ms
+            ys.append(val)
 
         with open(path, "r", errors="ignore") as f:
             for line in f:
-                if re.match(r"^------ .+ ------\s*$", line):
-                    if block_vals:
-                        ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
+                m_ts = DTWAnalyzer.TS_NS_RE.match(line)
+                if m_ts:
+                    flush()
+                    cur_ts = int(m_ts.group(1))
                     block_vals = []
                     continue
 
                 m = DTWAnalyzer.BACKLOG_RE.search(line)
                 if m:
-                    block_vals.append(int(m.group(2)))  # packets
+                    block_vals.append(int(m.group(2) if mode == "packets" else m.group(1)))
 
-        if block_vals:
-            ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
+        flush()
+        return t_ms, ys
 
+    def read_qdisc_trace(self, path: Path):
+        """
+        Preferred for plotting qdisc: uses TS_NS if present.
+        Caches (t_ms, y).
+        """
+        key = (str(path), self.mode)
+        if key in self._qdisc_trace_cache:
+            return self._qdisc_trace_cache[key]
+
+        # detect TS_NS quickly
+        has_ts = False
+        with open(path, "r", errors="ignore") as f:
+            for _ in range(50):
+                line = f.readline()
+                if not line:
+                    break
+                if self.TS_NS_RE.match(line):
+                    has_ts = True
+                    break
+
+        if has_ts:
+            t_ms, y = self._read_qdisc_trace_tsns(path, self.mode)
+        else:
+            # no timestamps -> fallback to synthetic dt later if needed
+            t_ms, y = [], self.read_qdisc_series(path)
+
+        self._qdisc_trace_cache[key] = (t_ms, y)
+        return t_ms, y
+
+    def read_qdisc_series(self, path: Path):
+        """
+        DTW uses y-only series.
+        If TS_NS logs exist, reuse trace and drop time.
+        """
+        key = (str(path), self.mode)
+        if key in self._qdisc_series_cache:
+            return self._qdisc_series_cache[key]
+
+        # Try TS_NS trace first
+        t_ms, y = self.read_qdisc_trace(path)
+        if y:
+            self._qdisc_series_cache[key] = y
+            return y
+
+        # Fallback (shouldn't happen)
+        ys = self._read_qdisc_packets_legacy(path) if self.mode == "packets" else self._read_qdisc_bytes_legacy(path)
+        self._qdisc_series_cache[key] = ys
         return ys
 
     # ===============================================================
@@ -169,19 +280,6 @@ class DTWAnalyzer:
                         ys.append(int(line.split(":")[-1].strip()))
                     except:
                         pass
-        return ys
-
-    # ===============================================================
-    # UNIVERSAL READERS (switch based on mode)
-    # + per-file memoization to avoid quadratic file rereads
-    # ===============================================================
-    def read_qdisc_series(self, path: Path):
-        key = (str(path), self.mode)
-        if key in self._qdisc_series_cache:
-            return self._qdisc_series_cache[key]
-
-        ys = self._read_qdisc_packets(path) if self.mode == "packets" else self._read_qdisc_bytes(path)
-        self._qdisc_series_cache[key] = ys
         return ys
 
     def read_mahi_series(self, path: Path):
@@ -219,7 +317,7 @@ class DTWAnalyzer:
         return prev[m]
 
     # ===============================================================
-    # WORKERS (use in-worker caches to avoid re-reading same files)
+    # WORKERS
     # ===============================================================
     def _compute_cross_worker(self, pair):
         qi, qf, oi, of = pair
@@ -255,7 +353,6 @@ class DTWAnalyzer:
         qdisc_files = self._get_qdisc_files()
         mahi_files = self._get_mahi_files()
 
-        # <-- UPDATED: use trailing _<number> id extraction
         qpairs = [(self._extract_id(f), f) for f in qdisc_files]
         mpairs = [(self._extract_id(f), f) for f in mahi_files]
 
@@ -272,8 +369,6 @@ class DTWAnalyzer:
 
     def compute_qdisc_internal(self):
         qdisc_files = self._get_qdisc_files()
-
-        # <-- UPDATED
         qpairs = [(self._extract_id(f), f) for f in qdisc_files]
 
         jobs = []
@@ -296,8 +391,6 @@ class DTWAnalyzer:
 
     def compute_mahi_internal(self):
         mahi_files = self._get_mahi_files()
-
-        # <-- UPDATED
         mpairs = [(self._extract_id(f), f) for f in mahi_files]
 
         jobs = []
@@ -385,6 +478,8 @@ class DTWAnalyzer:
 
     # ===============================================================
     # OVERLAID QUEUE PLOTS (Mahimahi vs Linux qdisc)
+    # - Mahimahi: still uniform dt_ms (it truly is 16ms in your trace)
+    # - Qdisc: uses TS_NS real timestamps (ms)
     # ===============================================================
     def plot_overlay_queue_traces(self, dt_ms: int = 16, cutoff_ms: int = 1000, show_legend: bool = False):
         cutoff_samples = cutoff_ms // dt_ms
@@ -396,7 +491,7 @@ class DTWAnalyzer:
 
         global_ymin = float("inf")
         global_ymax = float("-inf")
-        global_xmax = 0
+        global_xmax = 0.0
 
         # ---- Mahimahi overlay ----
         ax = axes[0]
@@ -411,7 +506,7 @@ class DTWAnalyzer:
 
             global_ymin = min(global_ymin, min(y))
             global_ymax = max(global_ymax, max(y))
-            global_xmax = max(global_xmax, t_ms[-1])
+            global_xmax = max(global_xmax, float(t_ms[-1]))
 
         ax.set_title(f"Mahimahi queue vs time (overlay, {self.mode})")
         ax.set_xlabel("Time (ms)")
@@ -420,20 +515,28 @@ class DTWAnalyzer:
         if show_legend:
             ax.legend(fontsize=7)
 
-        # ---- Linux qdisc overlay ----
+        # ---- Linux qdisc overlay (REAL TIME) ----
         ax = axes[1]
         for f in qdisc_files:
-            y = self.read_qdisc_series(f)
-            if len(y) <= cutoff_samples:
+            t_ms, y = self.read_qdisc_trace(f)
+            if not t_ms or not y:
                 continue
-            y = y[cutoff_samples:]
-            t_ms = [(i + cutoff_samples) * dt_ms for i in range(len(y))]
 
-            ax.plot(t_ms, y, linewidth=0.6, marker="o", markersize=2, label=f.stem)
+            # cutoff by actual time (ms), not sample count
+            start_idx = 0
+            while start_idx < len(t_ms) and t_ms[start_idx] < cutoff_ms:
+                start_idx += 1
 
-            global_ymin = min(global_ymin, min(y))
-            global_ymax = max(global_ymax, max(y))
-            global_xmax = max(global_xmax, t_ms[-1])
+            t2 = t_ms[start_idx:]
+            y2 = y[start_idx:]
+            if not y2:
+                continue
+
+            ax.plot(t2, y2, linewidth=0.6, marker="o", markersize=2, label=f.stem)
+
+            global_ymin = min(global_ymin, min(y2))
+            global_ymax = max(global_ymax, max(y2))
+            global_xmax = max(global_xmax, float(t2[-1]))
 
         ax.set_title(f"Linux qdisc queue vs time (overlay, {self.mode})")
         ax.set_xlabel("Time (ms)")
