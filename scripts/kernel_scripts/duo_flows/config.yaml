@@ -2,7 +2,7 @@
 
 runs:
   secs_per_run: 30
-  num_runs: 95
+  num_runs: 10
   setup_sec: 3
   warmup_sec: 3
   cooldown_sec: 3
@@ -20,7 +20,7 @@ net:
 qdisc:
   rate: 12mbit
   burst: 1k
-  target: 1ms
+  target: 15ms
   tupdate: 16ms
   limit: 15040000
   alpha: 0.16
@@ -34,19 +34,15 @@ flows:
     datagram_len: 1200
 
   l4s:
-    # TCP offered-load control is congestion-controlled.
-    # If your iperf3 supports it, this sets socket pacing (optional):
-    # Examples: "6M", "12M", "20M"
     # Number of parallel TCP streams:
     parallel: 1
 
 logging:
   dir: ./tmp
-  qdisc_sample_sec: 0.016
+  qdisc_sample_sec: 0.010 # This is really 16ms on average
   timeout_extra: 5
 
 cpu:
-  housekeeping: "0-3"
   experiment: "4-7"
   logger_core: 3
 
@@ -54,8 +50,6 @@ cpu:
   sender_core_l4s: 4
   receiver_core_l4s: 5
 
-  # classic UDP uses “two extra cores” by default:
+  # Classic UDP uses “two extra cores” by default:
+  # Here its offset is 2, so core 6 and 7 are used.
   udp_core_offset: 2
-  # optional explicit override (otherwise computed as l4s core + offset)
-  # sender_core_classic: 6
-  # receiver_core_classic: 7

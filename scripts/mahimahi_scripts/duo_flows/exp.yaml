@@ -1,24 +1,20 @@
-# exp.yaml (most updated for CONCURRENT classic UDP + l4s TCP)
-
+# exp.yaml (CONCURRENT classic UDP + l4s TCP)
 output_dir: ./outputs
 
 secs_per_run: 30
-num_runs: 90
+num_runs: 50
 
-# cpu shielding
-housekeeping: "0-3"
-experiment_cpus: "4-7"
+# Makes sure you have enough cores free on your system!
+# Recommended at least 4 free cores as housekeeping for your oOS!
+experiment_cpus: "4-8" # Here I'm leaving 0-3 cores for OS use and cores number above 8
 
 cores:
-  mahi_core: 7
-
-  # two concurrent servers (host side)
-  server_core_classic: 5
-  server_core_l4s: 6
-
-  # two concurrent clients (inside mm-link)
-  client_core_classic: 4
-  client_core_l4s: 7
+  # host-side servers are pinned
+  server_core_classic: 4
+  server_core_l4s: 5
+  mahimahi_core: 6
+  client_core_classic: 7
+  client_core_l4s: 8
 
 traces:
   up: ../traces/Constant.up
@@ -26,11 +22,11 @@ traces:
 
 queue:
   type: dualPI2
-  packets: 20000
-  target: 1
+  packets: 10000
+  target: 15
   tupdate: 16
-  alpha: 0.16
-  beta: 3
+  alpha: 0.00016
+  beta: 0.0032
 
 flows:
   # ports used per-run:
@@ -45,6 +41,6 @@ flows:
     tos: 0          # Not-ECT
 
   l4s:
-    # l4s is TCP
+    # l4s is TCP (Prague assumed set globally via sysctl before running)
     tos: 1          # ECT(1)
     cc: prague
