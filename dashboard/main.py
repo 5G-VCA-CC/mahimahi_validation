@@ -179,6 +179,26 @@ def set_mode_time():
     DTW_MODE = "t_ms"
     print("Switched variable → TIME (t_ms)")
 
+def set_mode_packet_dropped_total():
+    global DTW_MODE
+    DTW_MODE = "packet_dropped_total"
+    print("Switched variable → PACKET_DROPPED (packet_dropped_total)")
+    
+def set_mode_packet_dropped_l4s():
+    global DTW_MODE
+    DTW_MODE = "packet_dropped_l4s"
+    print("Switched variable → PACKET_DROPPED_L4S (packet_dropped_l4s)")
+
+def set_mode_packet_dropped_classic():
+    global DTW_MODE
+    DTW_MODE = "packet_dropped_classic"
+    print("Switched variable → PACKET_DROPPED_CLASSIC (packet_dropped_classic)")
+
+def set_mode_drop_overload():
+    global DTW_MODE
+    DTW_MODE = "drop_overload"
+    print("Switched variable → DROP_OVERLOAD (drop_overload)")
+
 
 # =============================================================
 # Single menu (starts here immediately)
@@ -202,7 +222,11 @@ def aqm_status_menu():
         print("8.  Use PACKETS (q_pkts)")
         print("9.  Use BYTES (q_bytes)")
         print("10. Use ECN_MARK (ecn_mark)")
-        print("11. Use TIME (t_ms)")
+        print("11. Use TIME (t_ms) - to check")
+        print("12. Use PACKET_DROPPED_TOTAL (packet_dropped_total)")
+        print("13. Use PACKET_DROPPED_L4S (packet_dropped_l4s)")
+        print("14. Use PACKET_DROPPED_CLASSIC (packet_dropped_classic)")
+        print("15. Use DROP_OVERLOAD (drop_overload)")
         print("0. Exit")
         print("===============================")
 
@@ -219,6 +243,10 @@ def aqm_status_menu():
         elif choice == "9": set_mode_bytes()
         elif choice == "10": set_mode_ecn()
         elif choice == "11": set_mode_time()
+        elif choice == "12": set_mode_packet_dropped_total()
+        elif choice == "13": set_mode_packet_dropped_l4s()
+        elif choice == "14": set_mode_packet_dropped_classic()
+        elif choice == "15": set_mode_drop_overload()
         elif choice == "0":
             print("Exiting.")
             return
