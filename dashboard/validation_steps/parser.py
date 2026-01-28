@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import re
 from itertools import product
@@ -5,84 +7,142 @@ from multiprocessing import Pool, cpu_count
 import matplotlib.pyplot as plt
 
 
+# ----------------------------
+# DTW (CPU) — normalized by max(len)
+# ----------------------------
+def _dtw_distance_norm(a, b) -> float:
+    n, m = len(a), len(b)
+    if n == 0 or m == 0:
+        return float("inf")
+
+    INF = float("inf")
+    prev = [INF] * (m + 1)
+    curr = [INF] * (m + 1)
+    prev[0] = 0.0
+
+    for i in range(1, n + 1):
+        curr[0] = INF
+        ai = a[i - 1]
+        for j in range(1, m + 1):
+            cost = abs(ai - b[j - 1])
+            curr[j] = cost + min(prev[j], curr[j - 1], prev[j - 1])
+        prev, curr = curr, prev
+
+    return prev[m] / max(n, m)
+
+
+def _series_from_trace(trace: dict, mode: str):
+    # mode: packets | bytes | ecn_mark | t_ms
+    if mode == "packets":
+        return trace["q_pkts"]
+    if mode == "bytes":
+        return trace["q_bytes"]
+    if mode == "ecn_mark":
+        return trace["ecn_mark"]
+    if mode == "t_ms":
+        return trace["t_ms"]
+    raise ValueError(f"Unknown mode={mode}")
+
+
+# ----------------------------
+# multiprocessing workers (must be top-level picklable)
+# ----------------------------
+def _cross_worker(args):
+    a_key, a_trace, b_key, b_trace, mode = args
+    a = _series_from_trace(a_trace, mode)
+    b = _series_from_trace(b_trace, mode)
+    d = _dtw_distance_norm(a, b)
+    return (a_key, b_key, d)
+
+
+def _internal_worker(args):
+    a_key, a_trace, b_key, b_trace, mode = args
+    a = _series_from_trace(a_trace, mode)
+    b = _series_from_trace(b_trace, mode)
+    d = _dtw_distance_norm(a, b)
+    return (a_key, b_key, d)
+
+
 class DTWAnalyzer:
-    BACKLOG_RE = re.compile(r"\bbacklog\s+(\d+)b\s+(\d+)p\b")
     _ID_AT_END = re.compile(r"_(\d+)$")
 
-    # NEW: TS_NS block header (from your updated bash logger)
+    # qdisc block header
     TS_NS_RE = re.compile(r"^TS_NS\s+(\d+)\s*$")
 
-    def __init__(self, qdisc_dir, mahi_dir, cache_file, mode="packets"):
-        """
-        mode = "bytes" or "packets"
-        """
+    # qdisc fields we need
+    BACKLOG_RE = re.compile(r"\bbacklog\s+(\d+)b\s+(\d+)p\b")
+    ECN_RE = re.compile(r"\becn_mark\s+(\d+)\b")
+
+    # Mahimahi QUEUE_STATS
+    QUEUE_STATS_RE = re.compile(
+        r"^\[QUEUE_STATS\]\s+t_ms=([0-9.eE+-]+)\s+q_pkts=(\d+)\s+q_bytes=(\d+)\s+ecn_mark=(\d+)"
+    )
+
+    def __init__(self, qdisc_dir, mahi_dir, mode="packets"):
         self.qdisc_dir = Path(qdisc_dir)
         self.mahi_dir = Path(mahi_dir)
-        self.cache_file = Path(cache_file)
-        self.mode = mode
-        self.num_processes = max(1, cpu_count() - 1)
+        self.mode = mode  # packets | bytes | ecn_mark | t_ms
+
+        # ✅ one cache file per variable (no args in main)
+        self.cache_file = Path(f"./dtw_cache_{self.mode}.txt")
+
+        # all cores
+        self.num_processes = max(1, cpu_count())
 
         # results
         self.cross_results = []
         self.qdisc_internal = []
         self.mahi_internal = []
 
-        # lookup dicts
         self.cross_dist = {}
         self.qdisc_dist = {}
         self.mahi_dist = {}
 
-        # parsed-series caches (avoid quadratic file rereads)
-        self._qdisc_series_cache = {}
-        self._mahi_series_cache = {}
+        # parsed traces (store all 4 vars)
+        self._qdisc_trace_cache = {}  # str(path) -> trace dict (NEVER None)
+        self._mahi_trace_cache = {}   # str(path) -> trace dict (NEVER None)
 
-        # NEW: time-aware qdisc trace cache: (t_ms, y)
-        self._qdisc_trace_cache = {}
-
-        # file lists (avoid repeated glob/sort)
         self._qdisc_files = None
         self._mahi_files = None
 
-    # ===============================================================
-    # FILE LIST HELPERS
-    # ===============================================================
+    # ----------------------------
+    # file lists
+    # ----------------------------
     def _get_qdisc_files(self):
-        if self._qdisc_files is None:
-            # matches: qdisc_foo.log, qdisc_classic_1.log, qdisc_l4s_run3.log, etc.
-            self._qdisc_files = sorted(self.qdisc_dir.glob("qdisc_*"))
-        return self._qdisc_files
+        return sorted(p for p in self.qdisc_dir.iterdir() if p.is_file())
 
     def _get_mahi_files(self):
-        if self._mahi_files is None:
-            # matches: output_1.txt, output_classic_1.txt, output_l4s_run3.txt, etc.
-            self._mahi_files = sorted(self.mahi_dir.glob("output_*"))
-        return self._mahi_files
+        return sorted(p for p in self.mahi_dir.iterdir() if p.is_file())
 
-    # ===============================================================
-    # filename id extractor
-    # expects the stem to end with _<number>, e.g. output_classic_1, qdisc_l4s_12
-    # ===============================================================
     def _extract_id(self, path: Path) -> int:
         m = self._ID_AT_END.search(path.stem)
         if not m:
             raise ValueError(f"Expected filename to end with _<number>: {path.name}")
         return int(m.group(1))
 
-    # ===============================================================
-    # CACHE LOADING
-    # ===============================================================
+    # ----------------------------
+    # Cache load/save (same format you already use)
+    # ----------------------------
     def load_cache(self):
         if not self.cache_file.exists():
             return False
 
-        print(f"Loading cached DTW from {self.cache_file}")
+        self.cross_results.clear()
+        self.qdisc_internal.clear()
+        self.mahi_internal.clear()
+        self.cross_dist.clear()
+        self.qdisc_dist.clear()
+        self.mahi_dist.clear()
 
         with open(self.cache_file, "r") as f:
             for line in f:
-                a, b, d = line.strip().split(",")
+                line = line.strip()
+                if not line:
+                    continue
+                a, b, d = line.split(",")
                 d = float(d)
 
-                # cross mode
+                # cross
                 if a.endswith("l") and b.endswith("m"):
                     self.cross_dist.setdefault(a, {})[b] = d
                     self.cross_results.append((a, b, d))
@@ -99,321 +159,8 @@ class DTWAnalyzer:
                     self.mahi_dist.setdefault(b, {})[a] = d
                     self.mahi_internal.append((a, b, d))
 
-        print("Loaded cache OK.\n")
         return True
 
-    # ===============================================================
-    # QDISC PARSERS
-    # - "series" readers for DTW (y only)
-    # - "trace" reader for plotting (t_ms + y) using TS_NS
-    # ===============================================================
-    @staticmethod
-    def _read_qdisc_packets_legacy(path: Path):
-        """
-        Old format: uses '------ date ------' separators.
-        Kept for backwards compatibility if you still have old logs.
-        """
-        ys = []
-        block_vals = []
-
-        with open(path, "r", errors="ignore") as f:
-            for line in f:
-                if re.match(r"^------ .+ ------\s*$", line):
-                    if block_vals:
-                        ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
-                    block_vals = []
-                    continue
-
-                m = DTWAnalyzer.BACKLOG_RE.search(line)
-                if m:
-                    block_vals.append(int(m.group(2)))  # packets
-
-        if block_vals:
-            ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
-
-        return ys
-
-    @staticmethod
-    def _read_qdisc_bytes_legacy(path: Path):
-        """
-        Old format: uses '------ date ------' separators.
-        """
-        ys = []
-        block_vals = []
-
-        with open(path, "r", errors="ignore") as f:
-            for line in f:
-                if re.match(r"^------ .+ ------\s*$", line):
-                    if block_vals:
-                        ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
-                    block_vals = []
-                    continue
-
-                m = DTWAnalyzer.BACKLOG_RE.search(line)
-                if m:
-                    block_vals.append(int(m.group(1)))  # bytes
-
-        if block_vals:
-            ys.append(block_vals[1] if len(block_vals) >= 2 else block_vals[0])
-
-        return ys
-
-    @staticmethod
-    def _read_qdisc_trace_tsns(path: Path, mode: str):
-        """
-        New format: each block begins with:
-            TS_NS <monotonic_ns>
-
-        Returns:
-            t_ms: elapsed ms since first TS_NS
-            y:    backlog (packets or bytes)
-        We still pick the 2nd backlog in each block if present (dualpi2 after htb),
-        else the 1st backlog.
-        """
-        t_ms = []
-        ys = []
-
-        cur_ts = None
-        block_vals = []
-        t0 = None
-
-        def flush():
-            nonlocal cur_ts, block_vals, t0
-            if cur_ts is None:
-                return
-            if not block_vals:
-                return
-
-            val = block_vals[1] if len(block_vals) >= 2 else block_vals[0]
-            if t0 is None:
-                t0 = cur_ts
-            t_ms.append((cur_ts - t0) / 1e6)  # ns -> ms
-            ys.append(val)
-
-        with open(path, "r", errors="ignore") as f:
-            for line in f:
-                m_ts = DTWAnalyzer.TS_NS_RE.match(line)
-                if m_ts:
-                    flush()
-                    cur_ts = int(m_ts.group(1))
-                    block_vals = []
-                    continue
-
-                m = DTWAnalyzer.BACKLOG_RE.search(line)
-                if m:
-                    block_vals.append(int(m.group(2) if mode == "packets" else m.group(1)))
-
-        flush()
-        return t_ms, ys
-
-    def read_qdisc_trace(self, path: Path):
-        """
-        Preferred for plotting qdisc: uses TS_NS if present.
-        Caches (t_ms, y).
-        """
-        key = (str(path), self.mode)
-        if key in self._qdisc_trace_cache:
-            return self._qdisc_trace_cache[key]
-
-        # detect TS_NS quickly
-        has_ts = False
-        with open(path, "r", errors="ignore") as f:
-            for _ in range(50):
-                line = f.readline()
-                if not line:
-                    break
-                if self.TS_NS_RE.match(line):
-                    has_ts = True
-                    break
-
-        if has_ts:
-            t_ms, y = self._read_qdisc_trace_tsns(path, self.mode)
-        else:
-            # no timestamps -> fallback to synthetic dt later if needed
-            t_ms, y = [], self.read_qdisc_series(path)
-
-        self._qdisc_trace_cache[key] = (t_ms, y)
-        return t_ms, y
-
-    def read_qdisc_series(self, path: Path):
-        """
-        DTW uses y-only series.
-        If TS_NS logs exist, reuse trace and drop time.
-        """
-        key = (str(path), self.mode)
-        if key in self._qdisc_series_cache:
-            return self._qdisc_series_cache[key]
-
-        # Try TS_NS trace first
-        t_ms, y = self.read_qdisc_trace(path)
-        if y:
-            self._qdisc_series_cache[key] = y
-            return y
-
-        # Fallback (shouldn't happen)
-        ys = self._read_qdisc_packets_legacy(path) if self.mode == "packets" else self._read_qdisc_bytes_legacy(path)
-        self._qdisc_series_cache[key] = ys
-        return ys
-
-    # ===============================================================
-    # MAHIMAHI PARSERS
-    # ===============================================================
-    @staticmethod
-    def _read_mahi_bytes(path: Path):
-        ys = []
-        with open(path, "r", errors="ignore") as f:
-            for line in f:
-                if "queue size in bytes:" in line:
-                    try:
-                        ys.append(int(line.split(":")[-1].strip()))
-                    except:
-                        pass
-        return ys
-
-    @staticmethod
-    def _read_mahi_packets(path: Path):
-        ys = []
-        with open(path, "r", errors="ignore") as f:
-            for line in f:
-                if "queue size in packets:" in line:
-                    try:
-                        ys.append(int(line.split(":")[-1].strip()))
-                    except:
-                        pass
-        return ys
-
-    def read_mahi_series(self, path: Path):
-        key = (str(path), self.mode)
-        if key in self._mahi_series_cache:
-            return self._mahi_series_cache[key]
-
-        ys = self._read_mahi_packets(path) if self.mode == "packets" else self._read_mahi_bytes(path)
-        self._mahi_series_cache[key] = ys
-        return ys
-
-    # ===============================================================
-    # DTW
-    # ===============================================================
-    @staticmethod
-    def dtw_distance(a, b):
-        n, m = len(a), len(b)
-        if n == 0 or m == 0:
-            return float(abs(sum(a) - sum(b)))
-
-        INF = float("inf")
-        prev = [INF] * (m + 1)
-        curr = [INF] * (m + 1)
-        prev[0] = 0
-
-        for i in range(1, n + 1):
-            curr[0] = INF
-            ai = a[i - 1]
-            for j in range(1, m + 1):
-                bj = b[j - 1]
-                cost = abs(ai - bj)
-                curr[j] = cost + min(prev[j], curr[j - 1], prev[j - 1])
-            prev, curr = curr, prev
-
-        return prev[m]
-
-    # ===============================================================
-    # WORKERS
-    # ===============================================================
-    def _compute_cross_worker(self, pair):
-        qi, qf, oi, of = pair
-        a = self.read_qdisc_series(qf)
-        b = self.read_mahi_series(of)
-        if not a or not b:
-            return None
-        d = self.dtw_distance(a, b) / max(len(a), len(b))
-        return (f"{qi}l", f"{oi}m", d)
-
-    def _compute_qdisc_worker(self, pair):
-        i, fi, j, fj = pair
-        a = self.read_qdisc_series(fi)
-        b = self.read_qdisc_series(fj)
-        if not a or not b:
-            return None
-        d = self.dtw_distance(a, b) / max(len(a), len(b))
-        return (f"{i}l", f"{j}l", d)
-
-    def _compute_mahi_worker(self, pair):
-        i, fi, j, fj = pair
-        a = self.read_mahi_series(fi)
-        b = self.read_mahi_series(fj)
-        if not a or not b:
-            return None
-        d = self.dtw_distance(a, b) / max(len(a), len(b))
-        return (f"{i}m", f"{j}m", d)
-
-    # ===============================================================
-    # COMPUTE
-    # ===============================================================
-    def compute_cross(self):
-        qdisc_files = self._get_qdisc_files()
-        mahi_files = self._get_mahi_files()
-
-        qpairs = [(self._extract_id(f), f) for f in qdisc_files]
-        mpairs = [(self._extract_id(f), f) for f in mahi_files]
-
-        jobs = [(qi, qf, oi, of) for (qi, qf), (oi, of) in product(qpairs, mpairs)]
-        print(f"Computing {len(jobs)} cross-mode DTW pairs...")
-
-        with Pool(self.num_processes) as pool:
-            for result in pool.imap_unordered(self._compute_cross_worker, jobs):
-                if result:
-                    self.cross_results.append(result)
-
-        for a, b, d in self.cross_results:
-            self.cross_dist.setdefault(a, {})[b] = d
-
-    def compute_qdisc_internal(self):
-        qdisc_files = self._get_qdisc_files()
-        qpairs = [(self._extract_id(f), f) for f in qdisc_files]
-
-        jobs = []
-        for (i, fi) in qpairs:
-            for (j, fj) in qpairs:
-                if j <= i:
-                    continue
-                jobs.append((i, fi, j, fj))
-
-        print(f"Computing {len(jobs)} qdisc internal pairs...")
-
-        with Pool(self.num_processes) as pool:
-            for result in pool.imap_unordered(self._compute_qdisc_worker, jobs):
-                if result:
-                    self.qdisc_internal.append(result)
-
-        for a, b, d in self.qdisc_internal:
-            self.qdisc_dist.setdefault(a, {})[b] = d
-            self.qdisc_dist.setdefault(b, {})[a] = d
-
-    def compute_mahi_internal(self):
-        mahi_files = self._get_mahi_files()
-        mpairs = [(self._extract_id(f), f) for f in mahi_files]
-
-        jobs = []
-        for (i, fi) in mpairs:
-            for (j, fj) in mpairs:
-                if j <= i:
-                    continue
-                jobs.append((i, fi, j, fj))
-
-        print(f"Computing {len(jobs)} mahimahi internal pairs...")
-
-        with Pool(self.num_processes) as pool:
-            for result in pool.imap_unordered(self._compute_mahi_worker, jobs):
-                if result:
-                    self.mahi_internal.append(result)
-
-        for a, b, d in self.mahi_internal:
-            self.mahi_dist.setdefault(a, {})[b] = d
-            self.mahi_dist.setdefault(b, {})[a] = d
-
-    # ===============================================================
-    # CACHE SAVE
-    # ===============================================================
     def save_cache(self):
         with open(self.cache_file, "w") as f:
             for a, b, d in self.cross_results:
@@ -423,11 +170,184 @@ class DTWAnalyzer:
             for a, b, d in self.mahi_internal:
                 f.write(f"{a},{b},{d}\n")
 
-        print(f"Saved DTW cache → {self.cache_file}")
+        print(f"[cache] wrote {self.cache_file.resolve()}")
 
-    # ===============================================================
-    # TRIPLE HISTOGRAM
-    # ===============================================================
+    # ----------------------------
+    # Parsing (store ALL 4 vars)
+    # ----------------------------
+    def read_mahi_trace_full(self, path: Path):
+        key = str(path)
+        if key in self._mahi_trace_cache:
+            return self._mahi_trace_cache[key]
+
+        tr = {"t_ms": [], "q_pkts": [], "q_bytes": [], "ecn_mark": []}
+
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                m = self.QUEUE_STATS_RE.match(line)
+                if not m:
+                    continue
+                # ignore logged t_ms completely
+                tr["q_pkts"].append(int(m.group(2)))
+                tr["q_bytes"].append(int(m.group(3)))
+                tr["ecn_mark"].append(int(m.group(4)))
+
+        # synthetic uniform time grid: 0ms, 16ms, 32ms, ...
+        step = 16.0
+        tr["t_ms"] = [i * step for i in range(len(tr["q_pkts"]))]
+
+        self._mahi_trace_cache[key] = tr
+        return tr
+
+    def read_qdisc_trace_full(self, path: Path) -> dict:
+        key = str(path)
+        tr = self._qdisc_trace_cache.get(key)
+        if tr is not None:
+            return tr
+
+        tr = {"t_ms": [], "q_pkts": [], "q_bytes": [], "ecn_mark": []}
+
+        cur_ts = None
+        t0 = None
+
+        # within one TS_NS block, keep the LAST backlog we see
+        last_bytes = None
+        last_pkts = None
+        block_ecn = 0
+
+        def flush():
+            nonlocal cur_ts, t0, last_bytes, last_pkts, block_ecn
+            if cur_ts is None:
+                return
+            if last_pkts is None or last_bytes is None:
+                return
+            if t0 is None:
+                t0 = cur_ts
+            tr["t_ms"].append((cur_ts - t0) / 1e6)  # ns -> ms
+            tr["q_pkts"].append(last_pkts)
+            tr["q_bytes"].append(last_bytes)
+            tr["ecn_mark"].append(block_ecn)
+
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                m_ts = self.TS_NS_RE.match(line)
+                if m_ts:
+                    flush()
+                    cur_ts = int(m_ts.group(1))
+                    last_bytes = None
+                    last_pkts = None
+                    block_ecn = 0
+                    continue
+
+                m_bl = self.BACKLOG_RE.search(line)
+                if m_bl:
+                    last_bytes = int(m_bl.group(1))
+                    last_pkts = int(m_bl.group(2))
+                    continue
+
+                m_ecn = self.ECN_RE.search(line)
+                if m_ecn:
+                    block_ecn = int(m_ecn.group(1))
+
+        flush()
+
+        self._qdisc_trace_cache[key] = tr
+        return tr
+
+    # convenience wrapper if you want old signature elsewhere
+    def read_mahi_trace(self, path: Path):
+        tr = self.read_mahi_trace_full(path)
+        return tr["t_ms"], _series_from_trace(tr, self.mode)
+
+    def read_qdisc_trace(self, path: Path):
+        tr = self.read_qdisc_trace_full(path)
+        return tr["t_ms"], _series_from_trace(tr, self.mode)
+
+    # ----------------------------
+    # DTW compute — CPU all cores
+    # ----------------------------
+    def compute_cross(self):
+        q_files = self._get_qdisc_files()
+        m_files = self._get_mahi_files()
+
+        # ✅ parse everything once (no None caches)
+        q_items = []
+        for qf in q_files:
+            qi = self._extract_id(qf)
+            q_key = f"{qi}l"
+            q_tr = self.read_qdisc_trace_full(qf)
+            q_items.append((q_key, q_tr))
+
+        m_items = []
+        for mf in m_files:
+            mi = self._extract_id(mf)
+            m_key = f"{mi}m"
+            m_tr = self.read_mahi_trace_full(mf)
+            m_items.append((m_key, m_tr))
+
+        jobs = [(qk, qt, mk, mt, self.mode) for (qk, qt), (mk, mt) in product(q_items, m_items)]
+
+        self.cross_results = []
+        self.cross_dist = {}
+
+        with Pool(self.num_processes) as pool:
+            for a, b, d in pool.imap_unordered(_cross_worker, jobs, chunksize=32):
+                self.cross_results.append((a, b, d))
+                self.cross_dist.setdefault(a, {})[b] = d
+
+    def compute_qdisc_internal(self):
+        q_files = self._get_qdisc_files()
+        items = []
+        for qf in q_files:
+            qi = self._extract_id(qf)
+            key = f"{qi}l"
+            tr = self.read_qdisc_trace_full(qf)
+            items.append((key, tr))
+
+        jobs = []
+        for i in range(len(items)):
+            a_key, a_tr = items[i]
+            for j in range(i + 1, len(items)):
+                b_key, b_tr = items[j]
+                jobs.append((a_key, a_tr, b_key, b_tr, self.mode))
+
+        self.qdisc_internal = []
+        self.qdisc_dist = {}
+
+        with Pool(self.num_processes) as pool:
+            for a, b, d in pool.imap_unordered(_internal_worker, jobs, chunksize=32):
+                self.qdisc_internal.append((a, b, d))
+                self.qdisc_dist.setdefault(a, {})[b] = d
+                self.qdisc_dist.setdefault(b, {})[a] = d
+
+    def compute_mahi_internal(self):
+        m_files = self._get_mahi_files()
+        items = []
+        for mf in m_files:
+            mi = self._extract_id(mf)
+            key = f"{mi}m"
+            tr = self.read_mahi_trace_full(mf)
+            items.append((key, tr))
+
+        jobs = []
+        for i in range(len(items)):
+            a_key, a_tr = items[i]
+            for j in range(i + 1, len(items)):
+                b_key, b_tr = items[j]
+                jobs.append((a_key, a_tr, b_key, b_tr, self.mode))
+
+        self.mahi_internal = []
+        self.mahi_dist = {}
+
+        with Pool(self.num_processes) as pool:
+            for a, b, d in pool.imap_unordered(_internal_worker, jobs, chunksize=32):
+                self.mahi_internal.append((a, b, d))
+                self.mahi_dist.setdefault(a, {})[b] = d
+                self.mahi_dist.setdefault(b, {})[a] = d
+
+    # ----------------------------
+    # Plotting (keep your API)
+    # ----------------------------
     @staticmethod
     def _extract_values(pairs):
         return [d for (_, _, d) in pairs]
@@ -440,20 +360,17 @@ class DTWAnalyzer:
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
         axes[0].hist(qvals, bins=30, edgecolor="black")
-        axes[0].set_title("Qdisc DTW Histogram")
+        axes[0].set_title(f"Qdisc DTW Histogram ({self.mode})")
 
         axes[1].hist(mvals, bins=30, edgecolor="black")
-        axes[1].set_title("Mahimahi DTW Histogram")
+        axes[1].set_title(f"Mahimahi DTW Histogram ({self.mode})")
 
         axes[2].hist(cvals, bins=30, edgecolor="black")
-        axes[2].set_title("Cross-Mode DTW Histogram")
+        axes[2].set_title(f"Cross-Mode DTW Histogram ({self.mode})")
 
         plt.tight_layout()
         return fig
 
-    # ===============================================================
-    # TRIPLE CDF
-    # ===============================================================
     def plot_triple_cdf(self):
         qvals = sorted(self._extract_values(self.qdisc_internal))
         mvals = sorted(self._extract_values(self.mahi_internal))
@@ -463,27 +380,20 @@ class DTWAnalyzer:
 
         if qvals:
             axes[0].plot(qvals, [i / len(qvals) for i in range(len(qvals))])
-        axes[0].set_title("Qdisc DTW CDF")
+        axes[0].set_title(f"Qdisc DTW CDF ({self.mode})")
 
         if mvals:
             axes[1].plot(mvals, [i / len(mvals) for i in range(len(mvals))])
-        axes[1].set_title("Mahimahi DTW CDF")
+        axes[1].set_title(f"Mahimahi DTW CDF ({self.mode})")
 
         if cvals:
             axes[2].plot(cvals, [i / len(cvals) for i in range(len(cvals))])
-        axes[2].set_title("Cross-Mode DTW CDF")
+        axes[2].set_title(f"Cross-Mode DTW CDF ({self.mode})")
 
         plt.tight_layout()
         return fig
 
-    # ===============================================================
-    # OVERLAID QUEUE PLOTS (Mahimahi vs Linux qdisc)
-    # - Mahimahi: still uniform dt_ms (it truly is 16ms in your trace)
-    # - Qdisc: uses TS_NS real timestamps (ms)
-    # ===============================================================
     def plot_overlay_queue_traces(self, dt_ms: int = 16, cutoff_ms: int = 1000, show_legend: bool = False):
-        cutoff_samples = cutoff_ms // dt_ms
-
         mahi_files = self._get_mahi_files()
         qdisc_files = self._get_qdisc_files()
 
@@ -496,59 +406,69 @@ class DTWAnalyzer:
         # ---- Mahimahi overlay ----
         ax = axes[0]
         for f in mahi_files:
-            y = self.read_mahi_series(f)
-            if len(y) <= cutoff_samples:
-                continue
-            y = y[cutoff_samples:]
-            t_ms = [(i + cutoff_samples) * dt_ms for i in range(len(y))]
-
-            ax.plot(t_ms, y, linewidth=0.6, marker="o", markersize=2, label=f.stem)
-
-            global_ymin = min(global_ymin, min(y))
-            global_ymax = max(global_ymax, max(y))
-            global_xmax = max(global_xmax, float(t_ms[-1]))
-
-        ax.set_title(f"Mahimahi queue vs time (overlay, {self.mode})")
-        ax.set_xlabel("Time (ms)")
-        ax.set_ylabel(f"Queue backlog ({self.mode})")
-        ax.grid(True, alpha=0.2)
-        if show_legend:
-            ax.legend(fontsize=7)
-
-        # ---- Linux qdisc overlay (REAL TIME) ----
-        ax = axes[1]
-        for f in qdisc_files:
-            t_ms, y = self.read_qdisc_trace(f)
+            tr = self.read_mahi_trace_full(f)
+            t_ms = tr["t_ms"]
+            y = _series_from_trace(tr, self.mode)
             if not t_ms or not y:
                 continue
 
-            # cutoff by actual time (ms), not sample count
-            start_idx = 0
-            while start_idx < len(t_ms) and t_ms[start_idx] < cutoff_ms:
-                start_idx += 1
+            k = 0
+            while k < len(t_ms) and t_ms[k] < cutoff_ms:
+                k += 1
 
-            t2 = t_ms[start_idx:]
-            y2 = y[start_idx:]
+            t2 = t_ms[k:]
+            y2 = y[k:]
             if not y2:
                 continue
 
-            ax.plot(t2, y2, linewidth=0.6, marker="o", markersize=2, label=f.stem)
+            ax.plot(t2, y2, linewidth=0.6, marker="o", markersize=2)
 
             global_ymin = min(global_ymin, min(y2))
             global_ymax = max(global_ymax, max(y2))
             global_xmax = max(global_xmax, float(t2[-1]))
 
-        ax.set_title(f"Linux qdisc queue vs time (overlay, {self.mode})")
+        ax.set_title(f"Mahimahi {self.mode} vs time (overlay)")
         ax.set_xlabel("Time (ms)")
-        ax.set_ylabel(f"Queue backlog ({self.mode})")
+        ax.set_ylabel(self.mode)
         ax.grid(True, alpha=0.2)
         if show_legend:
             ax.legend(fontsize=7)
 
-        # ---- FORCE SAME AXES ----
-        for ax in axes:
-            ax.set_ylim(global_ymin, global_ymax)
-            ax.set_xlim(0, global_xmax)
+        # ---- Linux qdisc overlay ----
+        ax = axes[1]
+        for f in qdisc_files:
+            tr = self.read_qdisc_trace_full(f)
+            t_ms = tr["t_ms"]
+            y = _series_from_trace(tr, self.mode)
+            if not t_ms or not y:
+                continue
+
+            k = 0
+            while k < len(t_ms) and t_ms[k] < cutoff_ms:
+                k += 1
+
+            t2 = t_ms[k:]
+            y2 = y[k:]
+            if not y2:
+                continue
+
+            ax.plot(t2, y2, linewidth=0.6, marker="o", markersize=2)
+
+            global_ymin = min(global_ymin, min(y2))
+            global_ymax = max(global_ymax, max(y2))
+            global_xmax = max(global_xmax, float(t2[-1]))
+
+        ax.set_title(f"Linux qdisc {self.mode} vs time (overlay)")
+        ax.set_xlabel("Time (ms)")
+        ax.set_ylabel(self.mode)
+        ax.grid(True, alpha=0.2)
+        if show_legend:
+            ax.legend(fontsize=7)
+
+        if global_ymin != float("inf") and global_ymax != float("-inf"):
+            for ax in axes:
+                ax.set_ylim(global_ymin, global_ymax)
+                ax.set_xlim(0, global_xmax)
 
         plt.tight_layout()
         return fig
