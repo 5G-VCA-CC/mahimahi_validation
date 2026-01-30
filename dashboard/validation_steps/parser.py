@@ -31,6 +31,37 @@ def _dtw_distance_norm(a, b) -> float:
     return prev[m] / max(n, m)
 
 
+# ----------------------------
+# Helpers: baseline normalize / delta
+# ----------------------------
+def _baseline_zero(y):
+    """Shift series so y[0] becomes 0 (for cumulative counters)."""
+    if not y:
+        return y
+    y0 = y[0]
+    return [v - y0 for v in y]
+
+
+def _to_deltas(y):
+    """Convert cumulative series to per-sample increments (non-negative)."""
+    if not y:
+        return y
+    out = [0]
+    for i in range(1, len(y)):
+        out.append(y[i] - y[i - 1])
+    return out
+
+
+def _is_cumulative_mode(mode: str) -> bool:
+    # These are typically reported as cumulative counters.
+    return mode in {
+        "ecn_mark",
+        "packet_dropped_total",
+        "packet_dropped_l4s",
+        "packet_dropped_classic",
+    }
+
+
 def _series_from_trace(trace: dict, mode: str):
     if mode == "packets":
         return trace["q_pkts"]
@@ -43,10 +74,10 @@ def _series_from_trace(trace: dict, mode: str):
 
     # ---- DROPS ----
     if mode == "packet_dropped_total":
-        # qdisc: already total
+        # qdisc: already total (cumulative)
         if "drop_total" in trace:
             return trace["drop_total"]
-        # mahi: sum components (include overload as "total drops")
+        # mahi: sum components (include overload as "total drops") (cumulative)
         return [
             trace["drop_l4s"][i] + trace["drop_classic"][i] + trace["drop_overload"][i]
             for i in range(len(trace["drop_l4s"]))
@@ -67,21 +98,32 @@ def _series_from_trace(trace: dict, mode: str):
     raise ValueError(f"Unknown mode={mode}")
 
 
+def _series_for_compare(trace: dict, mode: str):
+    """
+    What DTW/plots should operate on.
+    For cumulative counters, baseline-normalize so both start at 0.
+    """
+    y = _series_from_trace(trace, mode)
+    if _is_cumulative_mode(mode):
+        return _baseline_zero(y)
+    return y
+
+
 # ----------------------------
 # multiprocessing workers (must be top-level picklable)
 # ----------------------------
 def _cross_worker(args):
     a_key, a_trace, b_key, b_trace, mode = args
-    a = _series_from_trace(a_trace, mode)
-    b = _series_from_trace(b_trace, mode)
+    a = _series_for_compare(a_trace, mode)
+    b = _series_for_compare(b_trace, mode)
     d = _dtw_distance_norm(a, b)
     return (a_key, b_key, d)
 
 
 def _internal_worker(args):
     a_key, a_trace, b_key, b_trace, mode = args
-    a = _series_from_trace(a_trace, mode)
-    b = _series_from_trace(b_trace, mode)
+    a = _series_for_compare(a_trace, mode)
+    b = _series_for_compare(b_trace, mode)
     d = _dtw_distance_norm(a, b)
     return (a_key, b_key, d)
 
@@ -124,7 +166,7 @@ class DTWAnalyzer:
         self.qdisc_dist = {}
         self.mahi_dist = {}
 
-        # parsed traces (store all 4 vars)
+        # parsed traces
         self._qdisc_trace_cache = {}  # str(path) -> trace dict (NEVER None)
         self._mahi_trace_cache = {}   # str(path) -> trace dict (NEVER None)
 
@@ -147,7 +189,7 @@ class DTWAnalyzer:
         return int(m.group(1))
 
     # ----------------------------
-    # Cache load/save (same format you already use)
+    # Cache load/save
     # ----------------------------
     def load_cache(self):
         if not self.cache_file.exists():
@@ -199,7 +241,7 @@ class DTWAnalyzer:
         print(f"[cache] wrote {self.cache_file.resolve()}")
 
     # ----------------------------
-    # Parsing (store ALL 4 vars)
+    # Parsing
     # ----------------------------
     def read_mahi_trace_full(self, path: Path):
         key = str(path)
@@ -226,7 +268,6 @@ class DTWAnalyzer:
                 tr["q_bytes"].append(int(m.group(3)))
                 tr["ecn_mark"].append(int(m.group(4)))
 
-                # drops optional
                 if m.group(5) is None:
                     tr["drop_l4s"].append(0)
                     tr["drop_classic"].append(0)
@@ -242,7 +283,6 @@ class DTWAnalyzer:
 
         self._mahi_trace_cache[key] = tr
         return tr
-
 
     def read_qdisc_trace_full(self, path: Path) -> dict:
         key = str(path)
@@ -299,7 +339,7 @@ class DTWAnalyzer:
 
                 m_dr = self.DROPPED_RE.search(line)
                 if m_dr:
-                    # If both htb + dualpi2 have "Sent ... dropped ...", this will keep the last one seen in the block
+                    # keeps the last "dropped X" seen in the TS block (often dualpi2)
                     block_drop_total = int(m_dr.group(1))
 
         flush()
@@ -307,23 +347,22 @@ class DTWAnalyzer:
         self._qdisc_trace_cache[key] = tr
         return tr
 
-    # convenience wrapper if you want old signature elsewhere
+    # convenience wrappers
     def read_mahi_trace(self, path: Path):
         tr = self.read_mahi_trace_full(path)
-        return tr["t_ms"], _series_from_trace(tr, self.mode)
+        return tr["t_ms"], _series_for_compare(tr, self.mode)
 
     def read_qdisc_trace(self, path: Path):
         tr = self.read_qdisc_trace_full(path)
-        return tr["t_ms"], _series_from_trace(tr, self.mode)
+        return tr["t_ms"], _series_for_compare(tr, self.mode)
 
     # ----------------------------
-    # DTW compute — CPU all cores
+    # DTW compute
     # ----------------------------
     def compute_cross(self):
         q_files = self._get_qdisc_files()
         m_files = self._get_mahi_files()
 
-        # ✅ parse everything once (no None caches)
         q_items = []
         for qf in q_files:
             qi = self._extract_id(qf)
@@ -399,7 +438,7 @@ class DTWAnalyzer:
                 self.mahi_dist.setdefault(b, {})[a] = d
 
     # ----------------------------
-    # Plotting (keep your API)
+    # Plotting (same API)
     # ----------------------------
     @staticmethod
     def _extract_values(pairs):
@@ -446,7 +485,7 @@ class DTWAnalyzer:
         plt.tight_layout()
         return fig
 
-    def plot_overlay_queue_traces(self, dt_ms: int = 16, cutoff_ms: int = 1000, show_legend: bool = False):
+    def plot_overlay_queue_traces(self, dt_ms: int = 16, cutoff_ms: int = 0, show_legend: bool = False):
         mahi_files = self._get_mahi_files()
         qdisc_files = self._get_qdisc_files()
 
@@ -461,7 +500,7 @@ class DTWAnalyzer:
         for f in mahi_files:
             tr = self.read_mahi_trace_full(f)
             t_ms = tr["t_ms"]
-            y = _series_from_trace(tr, self.mode)
+            y = _series_for_compare(tr, self.mode)
             if not t_ms or not y:
                 continue
 
@@ -492,7 +531,7 @@ class DTWAnalyzer:
         for f in qdisc_files:
             tr = self.read_qdisc_trace_full(f)
             t_ms = tr["t_ms"]
-            y = _series_from_trace(tr, self.mode)
+            y = _series_for_compare(tr, self.mode)
             if not t_ms or not y:
                 continue
 

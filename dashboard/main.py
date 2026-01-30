@@ -91,7 +91,7 @@ def plot_graph_check():
     for p in sorted(Path(QDISC_DIR).glob("qdisc_*")):
         print("  ", p.name)
 
-    fig = an.plot_overlay_queue_traces(dt_ms=16, cutoff_ms=1000, show_legend=False)
+    fig = an.plot_overlay_queue_traces(dt_ms=16, cutoff_ms=0, show_legend=False)
     _save_fig(fig, f"overlay_{DTW_MODE}.png")
 
 
