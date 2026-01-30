@@ -32,7 +32,6 @@ def _dtw_distance_norm(a, b) -> float:
 
 
 def _series_from_trace(trace: dict, mode: str):
-    # mode: packets | bytes | ecn_mark | t_ms
     if mode == "packets":
         return trace["q_pkts"]
     if mode == "bytes":
@@ -41,6 +40,30 @@ def _series_from_trace(trace: dict, mode: str):
         return trace["ecn_mark"]
     if mode == "t_ms":
         return trace["t_ms"]
+
+    # ---- DROPS ----
+    if mode == "packet_dropped_total":
+        # qdisc: already total
+        if "drop_total" in trace:
+            return trace["drop_total"]
+        # mahi: sum components (include overload as "total drops")
+        return [
+            trace["drop_l4s"][i] + trace["drop_classic"][i] + trace["drop_overload"][i]
+            for i in range(len(trace["drop_l4s"]))
+        ]
+
+    if mode == "packet_dropped_l4s":
+        if "drop_l4s" in trace:
+            return trace["drop_l4s"]
+        # qdisc has no per-class breakdown → fall back to total
+        return trace["drop_total"]
+
+    if mode == "packet_dropped_classic":
+        if "drop_classic" in trace:
+            return trace["drop_classic"]
+        # qdisc has no per-class breakdown → fall back to total
+        return trace["drop_total"]
+
     raise ValueError(f"Unknown mode={mode}")
 
 
@@ -76,12 +99,15 @@ class DTWAnalyzer:
     # Mahimahi QUEUE_STATS
     QUEUE_STATS_RE = re.compile(
         r"^\[QUEUE_STATS\]\s+t_ms=([0-9.eE+-]+)\s+q_pkts=(\d+)\s+q_bytes=(\d+)\s+ecn_mark=(\d+)"
+        r"(?:\s+drop_l4s=(\d+)\s+drop_classic=(\d+)\s+drop_overload=(\d+))?"
     )
+
+    DROPPED_RE = re.compile(r"\(\s*dropped\s+(\d+)\s*,")
 
     def __init__(self, qdisc_dir, mahi_dir, mode="packets"):
         self.qdisc_dir = Path(qdisc_dir)
         self.mahi_dir = Path(mahi_dir)
-        self.mode = mode  # packets | bytes | ecn_mark | t_ms
+        self.mode = mode  # packets | bytes | ecn_mark | t_ms | packet_dropped_total | packet_dropped_l4s | packet_dropped_classic
 
         # ✅ one cache file per variable (no args in main)
         self.cache_file = Path(f"./dtw_cache_{self.mode}.txt")
@@ -180,17 +206,35 @@ class DTWAnalyzer:
         if key in self._mahi_trace_cache:
             return self._mahi_trace_cache[key]
 
-        tr = {"t_ms": [], "q_pkts": [], "q_bytes": [], "ecn_mark": []}
+        tr = {
+            "t_ms": [],
+            "q_pkts": [],
+            "q_bytes": [],
+            "ecn_mark": [],
+            "drop_l4s": [],
+            "drop_classic": [],
+            "drop_overload": [],
+        }
 
         with open(path, "r", errors="ignore") as f:
             for line in f:
                 m = self.QUEUE_STATS_RE.match(line)
                 if not m:
                     continue
-                # ignore logged t_ms completely
+
                 tr["q_pkts"].append(int(m.group(2)))
                 tr["q_bytes"].append(int(m.group(3)))
                 tr["ecn_mark"].append(int(m.group(4)))
+
+                # drops optional
+                if m.group(5) is None:
+                    tr["drop_l4s"].append(0)
+                    tr["drop_classic"].append(0)
+                    tr["drop_overload"].append(0)
+                else:
+                    tr["drop_l4s"].append(int(m.group(5)))
+                    tr["drop_classic"].append(int(m.group(6)))
+                    tr["drop_overload"].append(int(m.group(7)))
 
         # synthetic uniform time grid: 0ms, 16ms, 32ms, ...
         step = 16.0
@@ -199,34 +243,37 @@ class DTWAnalyzer:
         self._mahi_trace_cache[key] = tr
         return tr
 
+
     def read_qdisc_trace_full(self, path: Path) -> dict:
         key = str(path)
         tr = self._qdisc_trace_cache.get(key)
         if tr is not None:
             return tr
 
-        tr = {"t_ms": [], "q_pkts": [], "q_bytes": [], "ecn_mark": []}
+        tr = {"t_ms": [], "q_pkts": [], "q_bytes": [], "ecn_mark": [], "drop_total": []}
 
         cur_ts = None
         t0 = None
 
-        # within one TS_NS block, keep the LAST backlog we see
         last_bytes = None
         last_pkts = None
         block_ecn = 0
+        block_drop_total = None
 
         def flush():
-            nonlocal cur_ts, t0, last_bytes, last_pkts, block_ecn
+            nonlocal cur_ts, t0, last_bytes, last_pkts, block_ecn, block_drop_total
             if cur_ts is None:
                 return
             if last_pkts is None or last_bytes is None:
                 return
             if t0 is None:
                 t0 = cur_ts
+
             tr["t_ms"].append((cur_ts - t0) / 1e6)  # ns -> ms
             tr["q_pkts"].append(last_pkts)
             tr["q_bytes"].append(last_bytes)
             tr["ecn_mark"].append(block_ecn)
+            tr["drop_total"].append(0 if block_drop_total is None else block_drop_total)
 
         with open(path, "r", errors="ignore") as f:
             for line in f:
@@ -237,6 +284,7 @@ class DTWAnalyzer:
                     last_bytes = None
                     last_pkts = None
                     block_ecn = 0
+                    block_drop_total = None
                     continue
 
                 m_bl = self.BACKLOG_RE.search(line)
@@ -248,6 +296,11 @@ class DTWAnalyzer:
                 m_ecn = self.ECN_RE.search(line)
                 if m_ecn:
                     block_ecn = int(m_ecn.group(1))
+
+                m_dr = self.DROPPED_RE.search(line)
+                if m_dr:
+                    # If both htb + dualpi2 have "Sent ... dropped ...", this will keep the last one seen in the block
+                    block_drop_total = int(m_dr.group(1))
 
         flush()
 
