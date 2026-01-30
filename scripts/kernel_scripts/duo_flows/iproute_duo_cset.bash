@@ -47,6 +47,13 @@ mono_ns_uptime() {
 # ----------------------------
 # Read config
 # ----------------------------
+# tc path can come from:
+#   1) YAML: tools.tc_path
+#   2) env:  TC_BIN
+#   3) default hardcoded path
+TC_BIN_CFG="$(yget tools.tc_path)"
+TC_BIN="${TC_BIN_CFG:-${TC_BIN:-/home/linghe-zhang/iproute2/tc/tc}}"
+
 SECS_LOG="$(yget runs.secs_per_run)"; SECS_LOG="${SECS_LOG:-30}"
 NUM_RUNS="$(yget runs.num_runs)"; NUM_RUNS="${NUM_RUNS:-1}"
 
@@ -185,30 +192,33 @@ start_qdisc_logger_housekeeping() {
   local qdisc_log="$LOG_DIR/qdisc_${idx}.log"
 
   echo "📊 Logging qdisc to $qdisc_log (core $LOGGER_CORE) for ${SECS_LOG}s (dt=${QDISC_SAMPLE_SEC})..."
-  (
-    taskset -c "$LOGGER_CORE" timeout "${LOG_TIME}s" bash -eu -o pipefail <<EOF
-NS_S="$NS_S"
-VETH_DEV="$VETH_DEV"
-QDISC_LOG="$qdisc_log"
-SECS_LOG="$SECS_LOG"
-QDISC_SAMPLE_SEC="$QDISC_SAMPLE_SEC"
 
-mono_ns_uptime() { awk '{printf "%.0f\n", \$1*1000000000}' /proc/uptime; }
+  taskset -c "$LOGGER_CORE" timeout "${LOG_TIME}s" bash -eu -o pipefail -c '
+    mono_ns_uptime() { awk "{printf \"%.0f\n\", \$1*1000000000}" /proc/uptime; }
 
-start=\$(mono_ns_uptime)
-end=\$(( start + SECS_LOG*1000000000 ))
+    start=$(mono_ns_uptime)
+    end=$(( start + SECS_LOG*1000000000 ))
 
-while :; do
-  now=\$(mono_ns_uptime)
-  (( now >= end )) && break
-  sleep "\$QDISC_SAMPLE_SEC"
-  {
-    echo "TS_NS \$now"
-    ip netns exec "\$NS_S" tc -s qdisc show dev "\$VETH_DEV"
-  } >> "\$QDISC_LOG"
-done
-EOF
-  ) & echo $!
+    while :; do
+      now=$(mono_ns_uptime)
+      (( now >= end )) && break
+
+      sleep "$QDISC_SAMPLE_SEC"
+
+      {
+        echo "TS_NS $now"
+        sudo ip netns exec "\$NS_S" "\$TC_BIN" -s qdisc show dev "\$VETH_DEV"
+      } >> "$QDISC_LOG"
+    done
+  ' \
+    NS_S="$NS_S" \
+    VETH_DEV="$VETH_DEV" \
+    TC_BIN="$TC_BIN" \
+    QDISC_LOG="$qdisc_log" \
+    SECS_LOG="$SECS_LOG" \
+    QDISC_SAMPLE_SEC="$QDISC_SAMPLE_SEC" &
+
+  echo $!
 }
 
 run_both_flows_concurrently_in_shield() {
@@ -331,13 +341,6 @@ run_once() {
   run_both_flows_concurrently_in_shield "$idx" &
   local EXP_PID=$!
 
-  echo "⏳ Waiting for BOTH iperf clients start markers..."
-  if ! timeout 10 bash -lc "while [[ ! -f '$marker_classic' || ! -f '$marker_l4s' ]]; do sleep 0.01; done"; then
-    echo "Error: one/both client markers never appeared (iperf failed to start?)"
-    cleanup_run
-    return 1
-  fi
-
   if (( WARMUP_SEC > 0 )); then
     echo "⏳ Warmup ${WARMUP_SEC}s (flows running, not logging)..."
     sleep "$WARMUP_SEC"
@@ -357,6 +360,7 @@ run_once() {
 
 echo "[*] Using config: $CFG"
 echo "[*] LOG_DIR=$LOG_DIR"
+echo "[*] TC_BIN=$TC_BIN"
 
 echo "[*] Resetting cset..."
 sudo cset shield --reset >/dev/null 2>&1 || true

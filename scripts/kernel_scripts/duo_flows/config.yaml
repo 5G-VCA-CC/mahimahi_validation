@@ -1,10 +1,13 @@
 # config.yaml
+tools:
+  # This will be the PATCHED tc with extra parameters logged
+  tc_path: /home/linghe-zhang/iproute2/tc/tc
 
 runs:
   secs_per_run: 30
   num_runs: 10
-  setup_sec: 3
-  warmup_sec: 3
+  setup_sec: 0 # This is only to wait after qdisc setup
+  warmup_sec: 0 # This is to skip initial part of the run for the burst parameter
   cooldown_sec: 3
 
 net:
