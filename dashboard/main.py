@@ -1,5 +1,5 @@
 from validation_steps.parser import DTWAnalyzer
-from validation_steps.p_test import ParametricDTWTest
+from validation_steps.p_test import NonparametricDTWTest
 from pathlib import Path
 
 # ============================================================
@@ -23,9 +23,8 @@ def _save_fig(fig, name: str):
 test_obj = None
 test_results = None
 
-# ✅ Now supports ALL 4 variables (DTW runs on the selected one)
-DTW_MODE = "packets"   # packets | bytes | ecn_mark | t_ms
-
+# DTW variable mode
+DTW_MODE = "packets"   # packets | bytes | ecn_mark | t_ms | drops
 
 # =============================================================
 # Parser / Pipeline
@@ -37,18 +36,14 @@ def run_parser():
 
     analyzer = DTWAnalyzer(QDISC_DIR, MAHI_DIR, mode=DTW_MODE)
 
-    print("Loading traces...")
-    print("Computing internal DTW distances...")
     analyzer.compute_cross()
-    
-    print("Computing Mahimahi internal DTW distances...")
     analyzer.compute_qdisc_internal()
     analyzer.compute_mahi_internal()
+
     print("Saving cache...")
     analyzer.save_cache()
 
     print("DTW Parsing Complete.")
-
 
 def build_full_dist(analyzer):
     full = {}
@@ -64,7 +59,6 @@ def build_full_dist(analyzer):
 
     return full
 
-
 # =============================================================
 # Visualization helpers
 # =============================================================
@@ -75,13 +69,11 @@ def view_histograms():
     fig = an.plot_triple_hist()
     _save_fig(fig, f"triple_hist_{DTW_MODE}.png")
 
-
 def view_cdfs():
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, mode=DTW_MODE)
     an.load_cache()
     fig = an.plot_triple_cdf()
     _save_fig(fig, f"triple_cdf_{DTW_MODE}.png")
-
 
 def plot_graph_check():
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, mode=DTW_MODE)
@@ -91,69 +83,86 @@ def plot_graph_check():
     for p in sorted(Path(QDISC_DIR).glob("qdisc_*")):
         print("  ", p.name)
 
-    fig = an.plot_overlay_queue_traces(dt_ms=16, cutoff_ms=0, show_legend=False)
+    fig = an.plot_overlay_queue_traces(
+        cutoff_ms=0,
+    )
     _save_fig(fig, f"overlay_{DTW_MODE}.png")
 
-
 # =============================================================
-# Parametric permutation test
+# Nonparametric permutation test
 # =============================================================
 
-def run_parametric_test():
+def run_nonparametric_test():
     global test_obj, test_results, DTW_MODE
 
-    print(f"\n=== Running Parametric Permutation Test (variable = {DTW_MODE}) ===")
+    print(f"\n=== Running NONPARAMETRIC Permutation Test (variable = {DTW_MODE}) ===")
 
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, mode=DTW_MODE)
     an.load_cache()
 
-    mahi_keys = list(an.mahi_dist.keys())
+    mahi_keys  = list(an.mahi_dist.keys())
     qdisc_keys = list(an.qdisc_dist.keys())
+
     full = build_full_dist(an)
 
-    test_obj = ParametricDTWTest(full, mahi_keys, qdisc_keys)
+    test_obj = NonparametricDTWTest(full, mahi_keys, qdisc_keys)
 
-    num = input("How many random permutations? [default = 200]: ").strip()
-    num = int(num) if num else 200
+    num = input("How many random permutations? [default = 20,000]: ").strip()
+    num = int(num) if num else 20000
 
     print("\n--- Equivalence Threshold Setup ---")
     print("epsilon = acceptable DTW mean difference considered negligible.")
-    eps_in = input("Enter epsilon: ").strip()
 
+    eps_in = input("Enter epsilon: ").strip()
     try:
         epsilon = float(eps_in)
     except:
-        print("Invalid. Using epsilon = 1.0.")
-        epsilon = 1.0
+        epsilon = 0
 
-    test_results = test_obj.run(num_shuffles=num, epsilon=epsilon)
+    test_results = test_obj.run(
+        num_shuffles=num,
+        epsilon=epsilon
+    )
 
     print("\n=== Permutation Test Finished ===")
-    print(f"Original M-Q Mean DTW = {test_results['original_mean']:.6f}")
-    print(f"Num random ≥ original = {test_results['num_greater']}/{num}")
+    print(f"Observed M–Q Mean DTW = {test_results['original_mean']:.6f}")
+    print(f"Num random ≥ observed = {test_results['num_ge']}/{num}")
     print(f"p-value = {test_results['p_value']:.6f}\n")
 
-
-def view_parametric_results():
+def view_nonparametric_results():
     if test_results is None:
-        print("Run parametric test first.")
+        print("Run the nonparametric test first.")
         return
 
-    print("\n=== Permutation Test Results ===")
-    print(f"Original Mean: {test_results['original_mean']:.6f}")
-    print(f"Num greater: {test_results['num_greater']}")
+    print("\n=== Nonparametric Permutation Test Results ===")
+    print(f"Observed Mean: {test_results['original_mean']:.6f}")
+
+    # Prefer new key, fall back to old for safety
+    num_ge = test_results.get("num_ge", test_results.get("num_greater"))
+    total = test_results.get("num_shuffles_used",
+                              test_results.get("num_shuffles_requested"))
+
+    print(f"Num shuffled ≥ observed: {num_ge}/{total}")
     print(f"p-value: {test_results['p_value']:.6f}")
 
+    # Optional: quick interpretation (correct direction)
+    if test_results["p_value"] < 0.05:
+        print("→ Evidence of DIFFERENCE (observed DTW unusually large under shuffling).")
+    else:
+        print("→ No strong evidence of difference.")
 
-def view_parametric_graph():
+def view_nonparametric_graph():
     if test_obj is None or test_results is None:
-        print("Run the parametric test first.")
+        print("Run the nonparametric test first.")
         return
-    test_obj.plot(show=False, save_path=f"./figs/perm_{DTW_MODE}.png")
 
+    test_obj.plot(
+        show=False,
+        save_path=f"./figs/perm_{DTW_MODE}.png"
+    )
 
 # =============================================================
-# Mode switches (ALL 4 variables)
+# Mode switches
 # =============================================================
 
 def set_mode_packets():
@@ -161,18 +170,15 @@ def set_mode_packets():
     DTW_MODE = "packets"
     print("Switched variable → PACKETS (q_pkts)")
 
-
 def set_mode_bytes():
     global DTW_MODE
     DTW_MODE = "bytes"
     print("Switched variable → BYTES (q_bytes)")
 
-
 def set_mode_ecn():
     global DTW_MODE
     DTW_MODE = "ecn_mark"
     print("Switched variable → ECN_MARK (ecn_mark)")
-
 
 def set_mode_time():
     global DTW_MODE
@@ -182,20 +188,20 @@ def set_mode_time():
 def set_mode_packet_dropped_total():
     global DTW_MODE
     DTW_MODE = "packet_dropped_total"
-    print("Switched variable → PACKET_DROPPED (packet_dropped_total)")
-    
+    print("Switched variable → PACKET_DROPPED_TOTAL")
+
 def set_mode_packet_dropped_l4s():
     global DTW_MODE
     DTW_MODE = "packet_dropped_l4s"
-    print("Switched variable → PACKET_DROPPED_L4S (packet_dropped_l4s)")
+    print("Switched variable → PACKET_DROPPED_L4S")
 
 def set_mode_packet_dropped_classic():
     global DTW_MODE
     DTW_MODE = "packet_dropped_classic"
-    print("Switched variable → PACKET_DROPPED_CLASSIC (packet_dropped_classic)")
+    print("Switched variable → PACKET_DROPPED_CLASSIC")
 
 # =============================================================
-# Single menu (starts here immediately)
+# Menu
 # =============================================================
 
 def aqm_status_menu():
@@ -209,17 +215,17 @@ def aqm_status_menu():
         print("2. View Histograms")
         print("3. View CDFs")
         print("4. Plot Graph Check (Mahimahi vs Kernel overlay)")
-        print("5. Run Parametric Test")
-        print("6. View Parametric Test Results")
-        print("7. View Parametric Test Graph")
+        print("5. Run NONPARAMETRIC Permutation Test")
+        print("6. View Permutation Test Results")
+        print("7. View Permutation Test Graph")
         print("------ VARIABLE SWITCH ------")
         print("8.  Use PACKETS (q_pkts)")
         print("9.  Use BYTES (q_bytes)")
         print("10. Use ECN_MARK (ecn_mark)")
-        print("11. Use TIME (t_ms) - to check")
-        print("12. Use PACKET_DROPPED_TOTAL (packet_dropped_total)")
-        print("13. Use PACKET_DROPPED_L4S (packet_dropped_l4s)")
-        print("14. Use PACKET_DROPPED_CLASSIC (packet_dropped_classic)")
+        print("11. Use TIME (t_ms)")
+        print("12. Use PACKET_DROPPED_TOTAL")
+        print("13. Use PACKET_DROPPED_L4S")
+        print("14. Use PACKET_DROPPED_CLASSIC")
         print("0. Exit")
         print("===============================")
 
@@ -229,9 +235,9 @@ def aqm_status_menu():
         elif choice == "2": view_histograms()
         elif choice == "3": view_cdfs()
         elif choice == "4": plot_graph_check()
-        elif choice == "5": run_parametric_test()
-        elif choice == "6": view_parametric_results()
-        elif choice == "7": view_parametric_graph()
+        elif choice == "5": run_nonparametric_test()
+        elif choice == "6": view_nonparametric_results()
+        elif choice == "7": view_nonparametric_graph()
         elif choice == "8": set_mode_packets()
         elif choice == "9": set_mode_bytes()
         elif choice == "10": set_mode_ecn()
@@ -245,6 +251,7 @@ def aqm_status_menu():
         else:
             print("Invalid choice.")
 
-
 if __name__ == "__main__":
+    # >>> CHANGED: nothing required here; derivative behavior lives in parser.py
     aqm_status_menu()
+    # <<< CHANGED

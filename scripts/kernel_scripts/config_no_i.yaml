@@ -1,0 +1,41 @@
+runs:
+  secs_per_run: 30
+  num_runs: 100
+  setup_sec: 3
+  warmup_sec: 0
+  cooldown_sec: 3
+
+net:
+  ns_s: ns_s
+  ns_r: ns_r
+  veth_dev: veth-s
+  dst_ip: 172.20.1.2
+  port_classic: 5202
+  port_l4s: 5203
+  rtt_ms: 0
+
+paths:
+  tc_bin: /home/linghe-zhang/iproute2/tc/tc   # set this to your custom tc if you need dualpi2 support, e.g. /path/to/tc
+
+qdisc:
+  rate: 12mbit
+  burst: 24k
+  target: 15ms
+  tupdate: 16ms
+  limit: 15040000
+  alpha: 0.16
+  beta: 3.2
+
+flows:
+  classic:
+    mode: udp          # udp | tcp
+    cc: cubic          # only used if mode=tcp
+    bandwidth: 12M     # only used if mode=udp
+    datagram_len: 1200 # only used if mode=udp
+
+  l4s:
+    cc: prague         # TCP CC for L4S flow
+
+logging:
+  dir: ./tmp
+  qdisc_sample_sec: 0.016
