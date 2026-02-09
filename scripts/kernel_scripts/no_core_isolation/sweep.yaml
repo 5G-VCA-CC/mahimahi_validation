@@ -1,0 +1,109 @@
+sweep:
+  regimes:
+    # ===================== Low-BDP (RTT 20ms) =====================
+
+    - name: LowBDP_singleL4S_20ms_12Mbps
+      net:
+        rtt_ms: 20
+      qdisc:
+        rate: 12mbit
+        limit: 250
+      flows:
+        l4s:
+          cc: prague
+
+    - name: LowBDP_singleClassic_20ms_12Mbps
+      net:
+        rtt_ms: 20
+      qdisc:
+        rate: 12mbit
+        limit: 250
+      flows:
+        classic:
+          mode: tcp
+          cc: cubic
+
+    - name: LowBDP_dual_20ms_12Mbps
+      net:
+        rtt_ms: 20
+      qdisc:
+        rate: 12mbit
+        limit: 250
+      flows:
+        classic:
+          mode: tcp
+          cc: cubic
+        l4s:
+          cc: prague
+
+    # ===================== Mid-BDP (RTT 40ms) =====================
+
+    - name: MidBDP_singleL4S_40ms_50Mbps
+      net:
+        rtt_ms: 40
+      qdisc:
+        rate: 50mbit
+        limit: 1024
+      flows:
+        l4s:
+          cc: prague
+
+    - name: MidBDP_singleClassic_40ms_50Mbps
+      net:
+        rtt_ms: 40
+      qdisc:
+        rate: 50mbit
+        limit: 1024
+      flows:
+        classic:
+          mode: tcp
+          cc: cubic
+
+    - name: MidBDP_dual_40ms_50Mbps
+      net:
+        rtt_ms: 40
+      qdisc:
+        rate: 50mbit
+        limit: 1024
+      flows:
+        classic:
+          mode: tcp
+          cc: cubic
+        l4s:
+          cc: prague
+
+    # ===================== High-BDP (RTT 100ms) =====================
+
+    - name: HighBDP_singleL4S_100ms_200Mbps
+      net:
+        rtt_ms: 100
+      qdisc:
+        rate: 200mbit
+        limit: 4167
+      flows:
+        l4s:
+          cc: prague
+
+    - name: HighBDP_singleClassic_100ms_200Mbps
+      net:
+        rtt_ms: 100
+      qdisc:
+        rate: 200mbit
+        limit: 4167
+      flows:
+        classic:
+          mode: tcp
+          cc: cubic
+
+    - name: HighBDP_dual_100ms_200Mbps
+      net:
+        rtt_ms: 100
+      qdisc:
+        rate: 200mbit
+        limit: 4167
+      flows:
+        classic:
+          mode: tcp
+          cc: cubic
+        l4s:
+          cc: prague
