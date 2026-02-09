@@ -3,7 +3,6 @@ from multiprocessing import Pool, cpu_count
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-
 class NonparametricDTWTest:
     """
     Permutation test on a DTW-based statistic.
@@ -243,3 +242,74 @@ class NonparametricDTWTest:
         print("================================================")
 
         return fig
+    
+    # ---------------------------------------------------------
+    # p-value convergence vs number of permutations
+    # ---------------------------------------------------------
+    def plot_pvalue_vs_perms(self,
+                             perm_list=(100, 1000, 2000, 4000, 8000, 10000, 15000, 20000, 25000, 30000),
+                             epsilon=1e-9,
+                             save_path: str | None = None,
+                             show: bool = False,
+                             dpi: int = 200):
+        """
+        Calls ORIGINAL run() once at max(perm_list), then computes p-values
+        for smaller N using prefixes of the SAME shuffled_means sequence.
+
+        p(N) = ( #{i < N : S_i >= S_obs - eps} + 1 ) / (N + 1)
+        """
+
+        perm_list = [int(x) for x in perm_list]
+        if not perm_list:
+            raise ValueError("perm_list is empty")
+
+        maxN = max(perm_list)
+
+        # Run once at maxN using original method
+        self.run(num_shuffles=maxN, epsilon=epsilon, verbose=False)
+
+        obs = float(self.results["original_mean"])
+        shuf = np.asarray(self.results["shuffled_means"], dtype=np.float64)
+
+        usableN = int(shuf.size)  # may be < maxN if NaNs were dropped
+
+        xs = []
+        ys = []
+        for N in perm_list:
+            N2 = min(N, usableN)
+            if N2 <= 0:
+                continue
+            num_ge = int(np.sum(shuf[:N2] >= (obs - epsilon)))
+            pN = (num_ge + 1) / (N2 + 1)
+            xs.append(N2)
+            ys.append(pN)
+
+        fig = plt.figure(figsize=(7, 4))
+        plt.plot(xs, ys, marker="o")
+
+        plt.axvline(20000, linestyle="--", linewidth=1.5, color="red",
+            label="N = 20,000")
+        
+        plt.xlabel("Number of permutations used (prefix)")
+        plt.ylabel("p-value")
+        plt.title(f"p-value vs permutations\nobs_mean={obs:.6f}, eps={epsilon:g}")
+        plt.grid(True, alpha=0.2)
+        plt.tight_layout()
+
+        if save_path:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight", format="svg")
+            print(f"Saved: {Path(save_path).resolve()}")
+            
+        plt.legend()
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        # Print the sweep values (nice for your report)
+        for N, pN in zip(xs, ys):
+            print(f"  N={N:>6}  p={pN:.6g}")
+
+        return xs, ys
+

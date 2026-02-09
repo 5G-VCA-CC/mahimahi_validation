@@ -12,7 +12,7 @@ net:
   dst_ip: 172.20.1.2
   port_classic: 5202
   port_l4s: 5203
-  rtt_ms: 0
+  rtt_ms: 20
 
 paths:
   tc_bin: /home/linghe-zhang/iproute2/tc/tc   # set this to your custom tc if you need dualpi2 support, e.g. /path/to/tc

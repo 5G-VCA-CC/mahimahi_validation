@@ -1,7 +1,7 @@
 from validation_steps.parser import DTWAnalyzer
 from validation_steps.p_test import NonparametricDTWTest
 from pathlib import Path
-
+import numpy as np
 # ============================================================
 # Validation Tool for AQM statuses
 # ============================================================
@@ -200,6 +200,38 @@ def set_mode_packet_dropped_classic():
     DTW_MODE = "packet_dropped_classic"
     print("Switched variable → PACKET_DROPPED_CLASSIC")
 
+def plot_perm_convergence():
+    global test_obj, test_results, DTW_MODE
+
+    print(f"\n=== Plot p-value vs permutations (variable = {DTW_MODE}) ===")
+
+    # Ensure test_obj exists for current mode (rebuild if needed)
+    an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, mode=DTW_MODE)
+    an.load_cache()
+
+    mahi_keys  = list(an.mahi_dist.keys())
+    qdisc_keys = list(an.qdisc_dist.keys())
+    full = build_full_dist(an)
+
+    test_obj = NonparametricDTWTest(full, mahi_keys, qdisc_keys)
+
+    eps_in = input("Enter epsilon: ").strip()
+    try:
+        epsilon = float(eps_in)
+    except:
+        epsilon = 0.0
+
+    perm_list = np.unique(
+        np.round(np.logspace(2, 5.3, 20)).astype(int)
+    ).tolist()
+
+    test_obj.plot_pvalue_vs_perms(
+        perm_list=perm_list,
+        epsilon=epsilon,
+        save_path=f"./figs/pvalue_vs_perms_{DTW_MODE}.svg",
+        show=False,
+    )
+
 # =============================================================
 # Menu
 # =============================================================
@@ -218,6 +250,7 @@ def aqm_status_menu():
         print("5. Run NONPARAMETRIC Permutation Test")
         print("6. View Permutation Test Results")
         print("7. View Permutation Test Graph")
+        print("15. Plot p-value vs permutations")
         print("------ VARIABLE SWITCH ------")
         print("8.  Use PACKETS (q_pkts)")
         print("9.  Use BYTES (q_bytes)")
@@ -245,6 +278,7 @@ def aqm_status_menu():
         elif choice == "12": set_mode_packet_dropped_total()
         elif choice == "13": set_mode_packet_dropped_l4s()
         elif choice == "14": set_mode_packet_dropped_classic()
+        elif choice == "15": plot_perm_convergence()
         elif choice == "0":
             print("Exiting.")
             return

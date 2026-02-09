@@ -1,0 +1,77 @@
+# Concurrent classic (UDP/TCP) + L4S (TCP) experiment
+# This is used by sweep.yaml to generate the actual experiment configurations.
+# If you want to run a single experiment, we still recommend you run through sweep_regimes.sh
+# You should only edit this file for core-selection, durations, additional Mahimahi configuration, and flow configuration.
+
+output_dir: ./outputs
+
+secs_per_run: 30
+num_runs: 1
+
+# CPUs reserved for experiment via cset shield
+# Leave 0–3 for OS / housekeeping
+experiment_cpus: "4-8"
+
+cores:
+  # Host-side iperf3 servers
+  server_core_classic: 4
+  server_core_l4s: 5
+
+  # Mahimahi process itself
+  mahimahi_core: 6
+
+  # Clients running inside Mahimahi
+  client_core_classic: 7
+  client_core_l4s: 8
+
+# Mahimahi traces
+traces:
+  up: ../traces/Constant.up
+  down: ../traces/Constant.down
+
+mahimahi:
+  # baseline fixed propagation delay (ms)
+  delay_ms: 10
+
+  # extra delay stage inside mm-link (ms)
+  link_delay_ms: 0
+
+# Queue discipline configuration
+queue:
+  type: dualPI2
+  packets: 10000
+  target: 15
+  tupdate: 16
+  alpha: 0.00016
+  beta: 0.0032
+
+flows:
+  # Ports used per run:
+  #   classic port = base_port + 2*idx
+  #   l4s     port = base_port + 2*idx + 1
+  base_port: 5300
+
+  # -------- Classic flow (OPTIONAL) --------
+  # Delete/comment out this entire block to disable classic.
+  classic:
+    # "udp" or "tcp"
+    proto: udp
+
+    # UDP-only (ignored if proto=tcp)
+    rate: "12M"
+    packet_len: 1200
+
+    # TOS value (Not-ECT = 0)
+    tos: 0
+
+    # TCP-only (optional)
+    # cc: cubic
+
+  # -------- L4S flow (OPTIONAL) --------
+  # Delete/comment out this entire block to disable L4S.
+  l4s:
+    # TOS = 1 enables ECT(1)
+    tos: 1
+
+    # congestion control (default prague if l4s block exists but cc omitted)
+    cc: prague
