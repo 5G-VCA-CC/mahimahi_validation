@@ -67,13 +67,13 @@ def view_histograms():
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, mode=DTW_MODE)
     an.load_cache()
     fig = an.plot_triple_hist()
-    _save_fig(fig, f"triple_hist_{DTW_MODE}.png")
+    _save_fig(fig, f"triple_hist_{DTW_MODE}.svg")
 
 def view_cdfs():
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, mode=DTW_MODE)
     an.load_cache()
     fig = an.plot_triple_cdf()
-    _save_fig(fig, f"triple_cdf_{DTW_MODE}.png")
+    _save_fig(fig, f"triple_cdf_{DTW_MODE}.svg")
 
 def plot_graph_check():
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, mode=DTW_MODE)
@@ -86,7 +86,7 @@ def plot_graph_check():
     fig = an.plot_overlay_queue_traces(
         cutoff_ms=0,
     )
-    _save_fig(fig, f"overlay_{DTW_MODE}.png")
+    _save_fig(fig, f"overlay_{DTW_MODE}.svg")
 
 # =============================================================
 # Nonparametric permutation test
@@ -158,7 +158,7 @@ def view_nonparametric_graph():
 
     test_obj.plot(
         show=False,
-        save_path=f"./figs/perm_{DTW_MODE}.png"
+        save_path=f"./figs/perm_{DTW_MODE}.svg"
     )
 
 # =============================================================

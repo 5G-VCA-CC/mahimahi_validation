@@ -1,2 +1,5 @@
-numpy
-matplotlib
+numpy==1.26.4
+matplotlib==3.10.6
+scipy==1.16.2
+dtaidistance==2.3.13
+tqdm==4.67.1

@@ -6,117 +6,24 @@ import re
 from multiprocessing import Pool, cpu_count
 import matplotlib
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
+
+plt.rcParams.update({
+    "svg.fonttype": "none",
+    "font.size": 11,
+    "axes.labelsize": 11,
+    "axes.titlesize": 12,
+})
+
 from tqdm import tqdm
 from dtaidistance import dtw
 
-CUTOFF_MS = 3000  # drop samples with t_ms < CUTOFF_MS
-
-# ============================================================
-# DTW + series helpers (pure functions)
-# ============================================================
-# def _dtw_distance_norm(a, b) -> float:
-#     """
-#     DTW distance normalized by the length of the optimal warping path.
-#     This yields a mean per-alignment-step deviation.
-
-#     Returns:
-#         total_cost / path_len
-#     """
-#     n, m = len(a), len(b)
-#     if n == 0 or m == 0:
-#         return float("inf")
-
-#     INF = float("inf")
-
-#     # dp_cost[j] = min cost to align a[:i] with b[:j] for current i
-#     prev_cost = [INF] * (m + 1)
-#     curr_cost = [INF] * (m + 1)
-
-#     # dp_len[j] = warping path length for the argmin alignment
-#     prev_len = [0] * (m + 1)
-#     curr_len = [0] * (m + 1)
-
-#     prev_cost[0] = 0.0
-#     prev_len[0] = 0
-
-#     for i in range(1, n + 1):
-#         curr_cost[0] = INF
-#         curr_len[0] = 0
-
-#         ai = a[i - 1]
-#         for j in range(1, m + 1):
-#             cost = abs(ai - b[j - 1])
-
-#             # candidates: (total_cost, path_len)
-#             c1_cost, c1_len = prev_cost[j], prev_len[j]       # (i-1, j)
-#             c2_cost, c2_len = curr_cost[j - 1], curr_len[j - 1] # (i, j-1)
-#             c3_cost, c3_len = prev_cost[j - 1], prev_len[j - 1] # (i-1, j-1)
-
-#             # pick best predecessor by cost (tie-break: shorter path)
-#             best_cost, best_len = c1_cost, c1_len
-#             if (c2_cost < best_cost) or (c2_cost == best_cost and c2_len < best_len):
-#                 best_cost, best_len = c2_cost, c2_len
-#             if (c3_cost < best_cost) or (c3_cost == best_cost and c3_len < best_len):
-#                 best_cost, best_len = c3_cost, c3_len
-
-#             curr_cost[j] = cost + best_cost
-#             curr_len[j] = best_len + 1
-
-#         prev_cost, curr_cost = curr_cost, prev_cost
-#         prev_len, curr_len = curr_len, prev_len
-
-#     total = prev_cost[m]
-#     path_len = prev_len[m]
-#     if path_len <= 0:
-#         return float("inf")
+CUTOFF_FRONT_MS = 5000
+CUTOFF_BACK_MS  = 5000   # or whatever you want
 
 import numpy as np
 from numba import njit
-
-def _bucket_mean(t_ms, y, window_ms: float):
-    """
-    Bucket an irregular/regular time series into fixed windows [0, window_ms), [window_ms, 2*window_ms), ...
-    Returns (t_bucket, y_bucket) where:
-      - t_bucket is the center time of the window
-      - y_bucket is the mean(y) of samples that landed in that window
-    Assumes t_ms is non-decreasing.
-    """
-    if not t_ms or not y or len(t_ms) != len(y):
-        return [], []
-
-    out_t = []
-    out_y = []
-
-    w = float(window_ms)
-    if w <= 0:
-        return list(t_ms), list(y)
-
-    # window index based on time since start (t_ms[0] should be ~0 for your traces)
-    cur_bin = int(t_ms[0] // w)
-    acc = 0.0
-    cnt = 0
-
-    def flush(bin_idx, acc, cnt):
-        if cnt <= 0:
-            return
-        start = bin_idx * w
-        center = start + 0.5 * w
-        out_t.append(center)
-        out_y.append(acc / cnt)
-
-    for ti, yi in zip(t_ms, y):
-        bin_idx = int(ti // w)
-        if bin_idx != cur_bin:
-            flush(cur_bin, acc, cnt)
-            cur_bin = bin_idx
-            acc = 0.0
-            cnt = 0
-        acc += float(yi)
-        cnt += 1
-
-    flush(cur_bin, acc, cnt)
-    return out_t, out_y
 
 @njit
 def _dtw_distance_norm_numba(a, b):
@@ -201,7 +108,6 @@ def _dtw_distance_norm(a, b):
     b_np = np.asarray(b, dtype=np.float64)
     return float(_dtw_distance_norm_numba(a_np, b_np))
 
-# >>> CHANGED: cumulative modes will be converted to rate (delta per ms), so baseline_zero not used
 def _is_cumulative_mode(mode: str) -> bool:
     return mode in {
         "ecn_mark",
@@ -209,7 +115,6 @@ def _is_cumulative_mode(mode: str) -> bool:
         "packet_dropped_l4s",
         "packet_dropped_classic",
     }
-# <<< CHANGED
 
 
 def _series_from_trace(trace: dict, mode: str):
@@ -225,10 +130,18 @@ def _series_from_trace(trace: dict, mode: str):
     if mode == "packet_dropped_total":
         if "drop_total" in trace:  # qdisc
             return trace["drop_total"]
-        # mahi: sum (cumulative)
+
+        # mahi: sum ALL drop reasons (cumulative)
+        dl4s = trace.get("drop_l4s", [])
+        n = len(dl4s)
+        dcl  = trace.get("drop_classic", [0] * n)
+        dovf = trace.get("drop_overflow", [0] * n)
+        dovl = trace.get("drop_overload", [0] * n)
+        dnet = trace.get("drop_not_ect", [0] * n)
+
         return [
-            trace["drop_l4s"][i] + trace["drop_classic"][i] + trace["drop_overload"][i]
-            for i in range(len(trace["drop_l4s"]))
+            dl4s[i] + dcl[i] + dovf[i] + dovl[i] + dnet[i]
+            for i in range(n)
         ]
 
     if mode == "packet_dropped_l4s":
@@ -260,6 +173,7 @@ def _diff_per_ms(t_ms, y):
         if dt <= 0:
             continue
         dy = float(y[i] - y[i - 1])
+        print("dt:", dt, "dy:", dy)
         out_t.append(float(t_ms[i]))
         out_y.append(dy / dt)
 
@@ -289,15 +203,32 @@ def _time_and_series_for_compare(trace: dict, mode: str):
 
 
 # >>> CHANGED: cutoff now uses time+series aligned (rate series for cumulative modes)
-def _cutoff_series(trace: dict, mode: str, cutoff_ms: int):
+def _cutoff_series(trace: dict, mode: str,
+                   cutoff_front_ms: int = 0,
+                   cutoff_back_ms: int = 0):
     t, y = _time_and_series_for_compare(trace, mode)
     if not t or not y:
         return y
 
-    k = 0
-    while k < len(t) and t[k] < cutoff_ms:
-        k += 1
-    return y[k:]
+    # front
+    start = 0
+    while start < len(t) and t[start] < cutoff_front_ms:
+        start += 1
+
+    # back
+    end = len(t)
+    if cutoff_back_ms > 0:
+        t_max = t[-1]
+        cutoff_time = t_max - cutoff_back_ms
+
+        # DEBUG (optional)
+        # print(f"[DBG] backcut: t_max={t_max} cutoff_time={cutoff_time} start={start} end0={end}")
+
+        while end > start and t[end - 1] >= cutoff_time:
+            # print(t[end - 1], "YE")
+            end -= 1
+
+    return y[start:end]
 # <<< CHANGED
 
 
@@ -325,58 +256,98 @@ def _pool_init(mode: str):
     global _G_MODE
     _G_MODE = mode
 
+def _parse_int_prefix(s: str, default: int = 0) -> int:
+    """
+    Parse a leading integer from a string, ignoring any trailing junk.
+    Examples:
+      "123" -> 123
+      "123," -> 123
+      "123Connecting" -> 123
+      "Connecting" -> default
+    """
+    s = s.strip()
+    if not s:
+        return default
+
+    i = 0
+    sign = 1
+    if s[0] == "-":
+        sign = -1
+        i = 1
+
+    num = 0
+    start = i
+    while i < len(s) and s[i].isdigit():
+        num = num * 10 + (ord(s[i]) - 48)
+        i += 1
+
+    if i == start:   # no digits found
+        return default
+    return sign * num
 
 def _read_mahi_trace_full_worker(path_str: str) -> dict:
+    t_ms = []
     q_pkts = []
     q_bytes = []
     ecn_mark = []
+
     drop_l4s = []
     drop_classic = []
+    drop_overflow = []
     drop_overload = []
+    drop_not_ect = []
 
     with open(path_str, "r", errors="ignore") as f:
         for line in f:
             if not line.startswith("[QUEUE_STATS]"):
                 continue
 
-            # Example tokens:
-            # [QUEUE_STATS] t_ms=... q_pkts=... q_bytes=... ecn_mark=... drop_l4s=... drop_classic=... drop_overload=...
             parts = line.split()
 
-            # defaults if drops missing
-            dl4s = 0
-            dcl  = 0
-            dov  = 0
-
+            tm = None
             qp = qb = em = None
+            dl4s = dcl = dovf = dovl = dnet = 0
 
             for tok in parts:
-                if tok.startswith("q_pkts="):
-                    qp = int(tok[7:])
-                elif tok.startswith("q_bytes="):
-                    qb = int(tok[8:])
-                elif tok.startswith("ecn_mark="):
-                    em = int(tok[9:])
-                elif tok.startswith("drop_l4s="):
-                    dl4s = int(tok[9:])
-                elif tok.startswith("drop_classic="):
-                    dcl = int(tok[13:])
-                elif tok.startswith("drop_overload="):
-                    dov = int(tok[14:])
+                if tok.startswith("t_ms="):
+                    # allow weirdness like "t_ms=38," by parsing float safely
+                    v = tok[5:].strip().rstrip(",")
+                    try:
+                        tm = float(v)
+                    except Exception:
+                        tm = None
 
-            if qp is None or qb is None or em is None:
+                elif tok.startswith("q_pkts="):
+                    qp = _parse_int_prefix(tok[7:], default=None)
+                elif tok.startswith("q_bytes="):
+                    qb = _parse_int_prefix(tok[8:], default=None)
+                elif tok.startswith("ecn_mark="):
+                    em = _parse_int_prefix(tok[9:], default=None)
+
+                elif tok.startswith("drop_l4s="):
+                    dl4s = _parse_int_prefix(tok[9:], default=0)
+                elif tok.startswith("drop_classic="):
+                    dcl = _parse_int_prefix(tok[13:], default=0)
+                elif tok.startswith("drop_overflow="):
+                    dovf = _parse_int_prefix(tok[14:], default=0)
+                elif tok.startswith("drop_overload="):
+                    dovl = _parse_int_prefix(tok[14:], default=0)
+                elif tok.startswith("drop_not_ect="):
+                    dnet = _parse_int_prefix(tok[13:], default=0)
+
+            if tm is None or qp is None or qb is None or em is None:
                 continue
 
+            t_ms.append(tm)
             q_pkts.append(qp)
             q_bytes.append(qb)
             ecn_mark.append(em)
+
             drop_l4s.append(dl4s)
             drop_classic.append(dcl)
-            drop_overload.append(dov)
-
-    # synthetic uniform time grid: 0, 16, 32, ...
-    n = len(q_pkts)
-    t_ms = [i * 16.0 for i in range(n)]
+            drop_overflow.append(dovf)
+            drop_overload.append(dovl)
+            drop_not_ect.append(dnet)
 
     return {
         "t_ms": t_ms,
@@ -385,7 +356,9 @@ def _read_mahi_trace_full_worker(path_str: str) -> dict:
         "ecn_mark": ecn_mark,
         "drop_l4s": drop_l4s,
         "drop_classic": drop_classic,
+        "drop_overflow": drop_overflow,
         "drop_overload": drop_overload,
+        "drop_not_ect": drop_not_ect,
     }
 
 def _parse_tc_num(s: str) -> int:
@@ -502,8 +475,9 @@ def _cross_worker_paths(args):
     q_tr = _read_qdisc_trace_full_worker(q_path)
     m_tr = _read_mahi_trace_full_worker(m_path)
 
-    a = _cutoff_series(q_tr, _G_MODE, CUTOFF_MS)
-    b = _cutoff_series(m_tr, _G_MODE, CUTOFF_MS)
+    a = _cutoff_series(q_tr, _G_MODE, cutoff_front_ms=CUTOFF_FRONT_MS, cutoff_back_ms=CUTOFF_BACK_MS)
+    b = _cutoff_series(m_tr, _G_MODE, cutoff_front_ms=CUTOFF_FRONT_MS, cutoff_back_ms=CUTOFF_BACK_MS)
+
     d = _dtw_distance_norm(a, b)
     return (q_key, m_key, d)
 
@@ -522,8 +496,8 @@ def _internal_worker_paths(args):
     else:
         b_tr = _read_mahi_trace_full_worker(b_path)
 
-    a = _cutoff_series(a_tr, _G_MODE, CUTOFF_MS)
-    b = _cutoff_series(b_tr, _G_MODE, CUTOFF_MS)
+    a = _cutoff_series(a_tr, _G_MODE, cutoff_front_ms=CUTOFF_FRONT_MS, cutoff_back_ms=CUTOFF_BACK_MS)
+    b = _cutoff_series(b_tr, _G_MODE, cutoff_front_ms=CUTOFF_FRONT_MS, cutoff_back_ms=CUTOFF_BACK_MS)
     d = _dtw_distance_norm(a, b)
     return (a_key, b_key, d)
 
@@ -790,25 +764,52 @@ class DTWAnalyzer:
 
         plt.tight_layout()
         return fig
+    
+    @staticmethod
+    def _robust_ylim(all_y, lo=1, hi=99, pad_frac=0.05):
+        ys = []
+        for y in all_y:
+            if y:
+                ys.extend(y)
 
+        if not ys:
+            return None
+
+        ys = np.asarray(ys, dtype=float)
+        ys = ys[np.isfinite(ys)]
+        if ys.size == 0:
+            return None
+
+        y0 = float(np.percentile(ys, lo))
+        y1 = float(np.percentile(ys, hi))
+
+        if y0 == y1:
+            # fallback if almost constant
+            y0 = float(np.min(ys))
+            y1 = float(np.max(ys))
+            if y0 == y1:
+                y0 -= 1.0
+                y1 += 1.0
+
+        pad = (y1 - y0) * pad_frac
+        return (y0 - pad, y1 + pad)
+    
     def plot_overlay_queue_traces(self, cutoff_ms: int = 0):
         mahi_files = self._get_mahi_files()
         qdisc_files = self._get_qdisc_files()
 
         fig, axes = plt.subplots(1, 2, figsize=(18, 5))
 
-        global_ymin = float("inf")
-        global_ymax = float("-inf")
+        all_y_plotted = []   # <-- collect y2 arrays here
         global_xmax = 0.0
 
         ax = axes[0]
         for f in mahi_files:
             tr = self.read_mahi_trace_full(f)
-            # >>> CHANGED: use aligned time+series (rate series for cumulative modes)
             t_ms, y = _time_and_series_for_compare(tr, self.mode)
-            # <<< CHANGED
             if not t_ms or not y:
                 continue
+
             k = 0
             while k < len(t_ms) and t_ms[k] < cutoff_ms:
                 k += 1
@@ -816,9 +817,9 @@ class DTWAnalyzer:
             y2 = y[k:]
             if not y2:
                 continue
+
             ax.plot(t2, y2, linewidth=0.6, marker="o", markersize=2)
-            global_ymin = min(global_ymin, min(y2))
-            global_ymax = max(global_ymax, max(y2))
+            all_y_plotted.append(y2)               # <-- add
             global_xmax = max(global_xmax, float(t2[-1]))
 
         ax.set_title(f"Mahimahi {self.mode} vs time (overlay)")
@@ -829,11 +830,10 @@ class DTWAnalyzer:
         ax = axes[1]
         for f in qdisc_files:
             tr = self.read_qdisc_trace_full(f)
-            # >>> CHANGED: use aligned time+series (rate series for cumulative modes)
             t_ms, y = _time_and_series_for_compare(tr, self.mode)
-            # <<< CHANGED
             if not t_ms or not y:
                 continue
+
             k = 0
             while k < len(t_ms) and t_ms[k] < cutoff_ms:
                 k += 1
@@ -841,9 +841,9 @@ class DTWAnalyzer:
             y2 = y[k:]
             if not y2:
                 continue
+
             ax.plot(t2, y2, linewidth=0.6, marker="o", markersize=2)
-            global_ymin = min(global_ymin, min(y2))
-            global_ymax = max(global_ymax, max(y2))
+            all_y_plotted.append(y2)               # <-- add
             global_xmax = max(global_xmax, float(t2[-1]))
 
         ax.set_title(f"Linux qdisc {self.mode} vs time (overlay)")
@@ -851,9 +851,11 @@ class DTWAnalyzer:
         ax.set_ylabel(self.mode)
         ax.grid(True, alpha=0.2)
 
-        if global_ymin != float("inf") and global_ymax != float("-inf"):
+        # <-- robust y-limits from percentiles
+        ylim = self._robust_ylim(all_y_plotted, lo=1, hi=99, pad_frac=0.05)
+        if ylim is not None:
             for ax in axes:
-                ax.set_ylim(global_ymin, global_ymax)
+                ax.set_ylim(*ylim)
                 ax.set_xlim(0, global_xmax)
 
         plt.tight_layout()
