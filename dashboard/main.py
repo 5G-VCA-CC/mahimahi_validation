@@ -2,6 +2,8 @@ from validation_steps.parser import DTWAnalyzer
 from validation_steps.p_test import NonparametricDTWTest
 from pathlib import Path
 import numpy as np
+from validation_steps.min import run_iperf_totalreceived_histogram
+
 # ============================================================
 # Validation Tool for AQM statuses
 # ============================================================
@@ -64,6 +66,15 @@ def build_full_dist(analyzer):
 # =============================================================
 
 def view_histograms():
+    global DTW_MODE
+    if DTW_MODE == "iperf_totalreceived":
+        # ONLY option we support for this mode
+        run_iperf_totalreceived_histogram(
+            qdisc_root=QDISC_DIR,
+            mahi_root=MAHI_DIR,
+        )
+        return
+
     an = DTWAnalyzer(QDISC_DIR, MAHI_DIR, mode=DTW_MODE)
     an.load_cache()
     fig = an.plot_triple_hist()
@@ -165,6 +176,21 @@ def view_nonparametric_graph():
 # Mode switches
 # =============================================================
 
+def set_mode_ldelay():
+    global DTW_MODE
+    DTW_MODE = "qdelay_l_ms"
+    print("Switched variable → L_QUEUE_DELAY (qdelay_l_ms)")
+
+def set_mode_cdelay():
+    global DTW_MODE
+    DTW_MODE = "qdelay_c_ms"
+    print("Switched variable → C_QUEUE_DELAY (qdelay_c_ms)")
+
+def set_mode_iperf_totalreceived():
+    global DTW_MODE
+    DTW_MODE = "iperf_totalreceived"
+    print("Switched variable → IPERF_TOTALRECEIVED (from iperf3 *server* logs)")
+
 def set_mode_packets():
     global DTW_MODE
     DTW_MODE = "packets"
@@ -259,6 +285,10 @@ def aqm_status_menu():
         print("12. Use PACKET_DROPPED_TOTAL")
         print("13. Use PACKET_DROPPED_L4S")
         print("14. Use PACKET_DROPPED_CLASSIC")
+        print("16. Use IPERF_TOTALRECEIVED (iperf3 server logs)")
+        print("17. Use L_QUEUE_DELAY (qdelay_l_ms)")
+        print("18. Use C_QUEUE_DELAY (qdelay_c_ms)")
+
         print("0. Exit")
         print("===============================")
 
@@ -279,6 +309,9 @@ def aqm_status_menu():
         elif choice == "13": set_mode_packet_dropped_l4s()
         elif choice == "14": set_mode_packet_dropped_classic()
         elif choice == "15": plot_perm_convergence()
+        elif choice == "16": set_mode_iperf_totalreceived()
+        elif choice == "17": set_mode_ldelay()
+        elif choice == "18": set_mode_cdelay()
         elif choice == "0":
             print("Exiting.")
             return
