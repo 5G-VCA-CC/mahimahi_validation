@@ -4,3 +4,4 @@ mahimahi_logs/*
 
 qdisc_logs/*
 !qdisc_logs/.gitkeep
+figs/*
