@@ -29,7 +29,7 @@ def main():
     root = here.parent                              # repo_root/
 
     qdisc_dir = root / "50mbps" / "l4s"
-    mahi_dir  = root / "iperf_max_delay_mahimahi"/ "50mbps-5" / "l4s"
+    mahi_dir  = root / "iperf_max_delay_mahimahi"/ "50mbps-10" / "l4s"
     out_dir   = root / "figs_headless"
 
     tool = AQMValidationTool(

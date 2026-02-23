@@ -86,10 +86,10 @@ class AQMValidationTool:
         # unknown -> treat like us
         return v / 1000.0
 
-    def _collect_id_files(self, root: str | Path) -> list[tuple[int, Path]]:
+    def _collect_id_files(self, root: str | Path, *, glob_pattern: str = "*") -> list[tuple[int, Path]]:
         root = Path(root)
         out: list[tuple[int, Path]] = []
-        for p in sorted(root.iterdir()):
+        for p in sorted(root.glob(glob_pattern)):
             if not p.is_file():
                 continue
             m = self._ID_AT_END.search(p.stem)
@@ -243,30 +243,32 @@ class AQMValidationTool:
 
         Computes per-run AVG queue delay for qdisc logs + mahimahi logs.
         Then plots:
-            1) Per-run scatter plot
-            2) Triple histogram over |Δ| distributions
+        1) Per-run scatter plot
+        2) Triple histogram over |Δ| distributions
             (within qdisc, within mahimahi, cross)
         """
 
-        # Collect files (sorted by filename)
-        q_items = self._collect_id_files(self.qdisc_dir)
-        m_items = self._collect_id_files(self.mahimahi_dir)
+        # Collect the correct files for each source
+        q_items = self._collect_id_files(self.qdisc_dir, glob_pattern="qdisc_*")
+        m_items = self._collect_id_files(self.mahimahi_dir, glob_pattern="output_*")
 
-        # Compute average delay per file (one scalar per run)
+        # One scalar (avg delay) per file/run
         q = np.asarray(
             [self._avg_delay_ms_from_qdisc_file(p, which) for _, p in q_items],
             dtype=np.float64,
         )
-
         m = np.asarray(
             [self._avg_delay_ms_from_mahi_file(p, which) for _, p in m_items],
             dtype=np.float64,
         )
 
         if q.size == 0 or m.size == 0:
-            raise RuntimeError(f"Need non-empty samples. qdisc={q.size}, mahi={m.size}")
+            raise RuntimeError(
+                f"Need non-empty samples. qdisc={q.size}, mahi={m.size} "
+                f"(patterns: qdisc_* / output_*)"
+            )
 
-        # Use simple sequential indices (file order)
+        # File-order indices (no filename id matching)
         xq = np.arange(q.size)
         xm = np.arange(m.size)
 
@@ -275,12 +277,8 @@ class AQMValidationTool:
         hist_path = self.out_dir / f"avg_{tag}_queue_delay_triple_hist.svg"
 
         # ---------------------------------------------------------
-        # Scatter plot (no connecting lines)
+        # Per-run scatter
         # ---------------------------------------------------------
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
         fig_runs = plt.figure(figsize=(10, 4))
         plt.scatter(xq, q, label="qdisc (linux)")
         plt.scatter(xm, m, label="mahimahi")
