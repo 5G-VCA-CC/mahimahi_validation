@@ -28,8 +28,8 @@ def main():
     here = Path(__file__).resolve().parent          # dashboard/
     root = here.parent                              # repo_root/
 
-    qdisc_dir = root / "50mbps" / "l4s"
-    mahi_dir  = root / "iperf_max_delay_mahimahi"/ "50mbps-10" / "l4s"
+    qdisc_dir = root / "200mbps" / "l4s"
+    mahi_dir  = root / "iperf_max_delay_mahimahi"/ "200mbps-10" / "l4s"
     out_dir   = root / "figs_headless"
 
     tool = AQMValidationTool(
