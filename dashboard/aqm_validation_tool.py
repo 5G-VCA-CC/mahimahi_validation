@@ -237,81 +237,81 @@ class AQMValidationTool:
         plt.tight_layout()
         return fig
 
-   def run_avg_queue_delay_histogram(self, which: str, *, quantile: float = 95.0):
-    """
-    which: "l" or "c"
+    def run_avg_queue_delay_histogram(self, which: str, *, quantile: float = 95.0):
+        """
+        which: "l" or "c"
 
-    Computes per-run AVG queue delay for qdisc logs + mahimahi logs.
-    Then plots:
-    1) Per-run line plot (connected)
-    2) Triple histogram over |Δ| distributions
-       (within qdisc, within mahimahi, cross)
-    """
+        Computes per-run AVG queue delay for qdisc logs + mahimahi logs.
+        Then plots:
+        1) Per-run line plot (connected)
+        2) Triple histogram over |Δ| distributions
+        (within qdisc, within mahimahi, cross)
+        """
 
-    # Collect the correct files for each source
-    q_items = self._collect_id_files(self.qdisc_dir, glob_pattern="qdisc_*")
-    m_items = self._collect_id_files(self.mahimahi_dir, glob_pattern="output_*")
+        # Collect the correct files for each source
+        q_items = self._collect_id_files(self.qdisc_dir, glob_pattern="qdisc_*")
+        m_items = self._collect_id_files(self.mahimahi_dir, glob_pattern="output_*")
 
-    # One scalar (avg delay) per file/run
-    q = np.asarray(
-        [self._avg_delay_ms_from_qdisc_file(p, which) for _, p in q_items],
-        dtype=np.float64,
-    )
-    m = np.asarray(
-        [self._avg_delay_ms_from_mahi_file(p, which) for _, p in m_items],
-        dtype=np.float64,
-    )
-
-    if q.size == 0 or m.size == 0:
-        raise RuntimeError(
-            f"Need non-empty samples. qdisc={q.size}, mahi={m.size} "
-            f"(patterns: qdisc_* / output_*)"
+        # One scalar (avg delay) per file/run
+        q = np.asarray(
+            [self._avg_delay_ms_from_qdisc_file(p, which) for _, p in q_items],
+            dtype=np.float64,
+        )
+        m = np.asarray(
+            [self._avg_delay_ms_from_mahi_file(p, which) for _, p in m_items],
+            dtype=np.float64,
         )
 
-    # File-order indices (no filename id matching)
-    xq = np.arange(q.size)
-    xm = np.arange(m.size)
+        if q.size == 0 or m.size == 0:
+            raise RuntimeError(
+                f"Need non-empty samples. qdisc={q.size}, mahi={m.size} "
+                f"(patterns: qdisc_* / output_*)"
+            )
 
-    tag = "l" if which == "l" else "c"
-    runs_path = self.out_dir / f"avg_{tag}_queue_delay_per_run.svg"
-    hist_path = self.out_dir / f"avg_{tag}_queue_delay_triple_hist.svg"
+        # File-order indices (no filename id matching)
+        xq = np.arange(q.size)
+        xm = np.arange(m.size)
 
-    # ---------------------------------------------------------
-    # Per-run connected plot (line plot instead of scatter)
-    # ---------------------------------------------------------
-    fig_runs = plt.figure(figsize=(10, 4))
+        tag = "l" if which == "l" else "c"
+        runs_path = self.out_dir / f"avg_{tag}_queue_delay_per_run.svg"
+        hist_path = self.out_dir / f"avg_{tag}_queue_delay_triple_hist.svg"
 
-    plt.plot(xq, q, marker="o", linestyle="-", label="qdisc (linux)")
-    plt.plot(xm, m, marker="o", linestyle="-", label="mahimahi")
+        # ---------------------------------------------------------
+        # Per-run connected plot (line plot instead of scatter)
+        # ---------------------------------------------------------
+        fig_runs = plt.figure(figsize=(10, 4))
 
-    plt.xlabel("run index (file order)")
-    plt.ylabel("avg queue delay (ms)")
-    plt.title(f"AVG_{tag.upper()}_QUEUE_DELAY — avg queue delay per run")
+        plt.plot(xq, q, marker="o", linestyle="-", label="qdisc (linux)")
+        plt.plot(xm, m, marker="o", linestyle="-", label="mahimahi")
 
-    plt.ticklabel_format(style="plain", axis="y")
-    plt.grid(True, alpha=0.2)
-    plt.legend()
-    plt.tight_layout()
+        plt.xlabel("run index (file order)")
+        plt.ylabel("avg queue delay (ms)")
+        plt.title(f"AVG_{tag.upper()}_QUEUE_DELAY — avg queue delay per run")
 
-    fig_runs.savefig(runs_path, dpi=200, bbox_inches="tight")
-    plt.close(fig_runs)
+        plt.ticklabel_format(style="plain", axis="y")
+        plt.grid(True, alpha=0.2)
+        plt.legend()
+        plt.tight_layout()
 
-    # ---------------------------------------------------------
-    # Triple histogram over |Δ|
-    # ---------------------------------------------------------
-    q_within = self._pairwise_abs_diffs(q)
-    m_within = self._pairwise_abs_diffs(m)
-    cross = self._cross_abs_diffs(q, m)
+        fig_runs.savefig(runs_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_runs)
 
-    fig_hist = self._plot_triple_hist_scalar_ms(
-        q_within, m_within, cross, quantile=quantile
-    )
-    fig_hist.savefig(hist_path, dpi=200, bbox_inches="tight")
-    plt.close(fig_hist)
+        # ---------------------------------------------------------
+        # Triple histogram over |Δ|
+        # ---------------------------------------------------------
+        q_within = self._pairwise_abs_diffs(q)
+        m_within = self._pairwise_abs_diffs(m)
+        cross = self._cross_abs_diffs(q, m)
 
-    print(f"[AVG_{tag.upper()}_QUEUE_DELAY] qdisc N={q.size}  mahi N={m.size}")
-    print(f"Saved: {runs_path.resolve()}")
-    print(f"Saved: {hist_path.resolve()}")
+        fig_hist = self._plot_triple_hist_scalar_ms(
+            q_within, m_within, cross, quantile=quantile
+        )
+        fig_hist.savefig(hist_path, dpi=200, bbox_inches="tight")
+        plt.close(fig_hist)
+
+        print(f"[AVG_{tag.upper()}_QUEUE_DELAY] qdisc N={q.size}  mahi N={m.size}")
+        print(f"Saved: {runs_path.resolve()}")
+        print(f"Saved: {hist_path.resolve()}")
 
     # =============================================================
     # Pipeline / DTW
