@@ -13,7 +13,7 @@ from mahimahi_validation.dashboard.aqm_validation_tool import AQMValidationTool
 
 def run_mode_triplet(tool: AQMValidationTool, mode: str):
     tool.set_mode(mode)
-    tool.run_parser()
+    # tool.run_parser()
     tool.view_histograms()
 
 

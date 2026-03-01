@@ -10,9 +10,6 @@ from mahimahi_validation.dashboard.validation_steps.dtw_analyzer import DTWAnaly
 from mahimahi_validation.dashboard.validation_steps.permutation_test import (
     NonparametricDTWTest,
 )
-from mahimahi_validation.dashboard.validation_steps.avg_bitrate_validation import (
-    run_avg_bitrate_histogram,
-)
 
 # UPDATED: you renamed validation.py -> timereseires_validation.py
 from mahimahi_validation.dashboard.validation_steps.timeseries_validation import (

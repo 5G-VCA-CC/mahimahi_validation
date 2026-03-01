@@ -287,7 +287,7 @@ class AvgBitrateValidation:
         AXIS_LABEL_SIZE = 36
         TICK_SIZE = 28
         Y_TICK_SIZE = 28
-        OFFSET_SIZE = 34   # 👈 scientific notation size
+        OFFSET_SIZE = 28   # 👈 scientific notation size
 
         xlab = x_label.replace("Avg", "Average").replace("avg", "average")
         ax.set_xlabel(xlab, fontsize=AXIS_LABEL_SIZE)
@@ -372,61 +372,61 @@ class AvgBitrateValidation:
         plt.close(fig)
         return None
         
-def run_avg_bitrate_histogram(
-    self,
-    qdisc_root: str | Path,
-    mahi_root: str | Path,
-    *,
-    out_path: str | Path = "./figs/avg_bitrate_validation_hist.svg",
-    quantile: float = 95.0,
-    include_x_axis_label: bool = False,
-    include_y_axis_label: bool = False,
-) -> None:
-    q_ids, q_bps = self.load_group_bitrates(qdisc_root)
-    m_ids, m_bps = self.load_group_bitrates(mahi_root)
+    def run_avg_bitrate_histogram(
+        self,
+        qdisc_root: str | Path,
+        mahi_root: str | Path,
+        *,
+        out_path: str | Path = "./figs/avg_bitrate_validation_hist.svg",
+        quantile: float = 95.0,
+        include_x_axis_label: bool = False,
+        include_y_axis_label: bool = False,
+    ) -> None:
+        q_ids, q_bps = self.load_group_bitrates(qdisc_root)
+        m_ids, m_bps = self.load_group_bitrates(mahi_root)
 
-    if q_bps.size == 0 or m_bps.size == 0:
-        raise RuntimeError("Need non-empty samples.")
+        if q_bps.size == 0 or m_bps.size == 0:
+            raise RuntimeError("Need non-empty samples.")
 
-    # Mbps
-    q = q_bps / 1e6
-    m = m_bps / 1e6
+        # Mbps
+        q = q_bps / 1e6
+        m = m_bps / 1e6
 
-    # diffs
-    q_within = self.pairwise_abs_diffs(q)
-    m_within = self.pairwise_abs_diffs(m)
-    cross = self.cross_abs_diffs(q, m)
+        # diffs
+        q_within = self.pairwise_abs_diffs(q)
+        m_within = self.pairwise_abs_diffs(m)
+        cross = self.cross_abs_diffs(q, m)
 
-    qfinite = q_within[np.isfinite(q_within)]
-    mfinite = m_within[np.isfinite(m_within)]
-    cfinite = cross[np.isfinite(cross)]
+        qfinite = q_within[np.isfinite(q_within)]
+        mfinite = m_within[np.isfinite(m_within)]
+        cfinite = cross[np.isfinite(cross)]
 
-    if cfinite.size == 0:
-        raise RuntimeError("No cross values for validation histogram.")
+        if cfinite.size == 0:
+            raise RuntimeError("No cross values for validation histogram.")
 
-    q_thr = float(np.percentile(qfinite, quantile))
-    m_thr = float(np.percentile(mfinite, quantile))
-    eps_min = min(q_thr, m_thr)
-    eps_max = max(q_thr, m_thr)
+        q_thr = float(np.percentile(qfinite, quantile))
+        m_thr = float(np.percentile(mfinite, quantile))
+        eps_min = min(q_thr, m_thr)
+        eps_max = max(q_thr, m_thr)
 
-    n = int(cfinite.size)
-    p_min = float((np.sum(cfinite > eps_min) + 1) / (n + 1))
-    p_max = float((np.sum(cfinite > eps_max) + 1) / (n + 1))
+        n = int(cfinite.size)
+        p_min = float((np.sum(cfinite > eps_min) + 1) / (n + 1))
+        p_max = float((np.sum(cfinite > eps_max) + 1) / (n + 1))
 
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    self._render_validation_histogram(
-        cfinite,
-        eps_max,
-        p_max,
-        x_label="Δ Avg Throughput (Mbps)",
-        include_x_axis_label=include_x_axis_label,
-        include_y_axis_label=include_y_axis_label,
-        out_path=out_path,
-    )
+        self._render_validation_histogram(
+            cfinite,
+            eps_max,
+            p_max,
+            x_label="Δ Avg Throughput (Mbps)",
+            include_x_axis_label=include_x_axis_label,
+            include_y_axis_label=include_y_axis_label,
+            out_path=out_path,
+        )
 
-    print(f"Saved: {out_path.resolve()}")
+        print(f"Saved: {out_path.resolve()}")
 
 def _render_validation_histogram(
     values: np.ndarray,
