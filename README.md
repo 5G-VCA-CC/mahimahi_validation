@@ -1,214 +1,377 @@
-# Mahimahi Validation Framework
+# Mahimahi ↔ Linux qdisc Validation Framework
 
-A structured experimental and validation framework for comparing **Mahimahi-based network emulation** against **native Linux kernel qdisc behavior**, supporting single-flow and dual-flow experiments with reproducible setup, logging, and statistical validation.
+This repository provides a **fully automated validation pipeline** for comparing  
+**Mahimahi-based network emulation** against **native Linux kernel qdisc behavior**.
 
----
+It is designed to answer, rigorously and reproducibly:
 
-## 📁 Project Structure
+- Does Mahimahi statistically match kernel behavior?
+- If not perfectly identical, how often does it exceed natural within-system variability?
+- How confident are we in that estimate given a finite number of runs?
+- Which tuning (threshold/target variants) best matches kernel behavior?
 
-!! Python 3.11 
-
-```text
-mahimahi_validation/
-├── dashboard/
-│   ├── main.py
-│   │   └── Main validation console / entry point
-│   │
-│   ├── validation_steps/
-│   │   └── Parsers, permutation tests, and statistical validation logic
-│   │
-│   └── validation_visuals/
-│       └── Clustering, plotting, and visual analysis tools
-│
-├── mahimahi_logs/
-│   └── Mahimahi output logs (output_*.txt)
-│
-├── qdisc_logs/
-│   └── Linux kernel qdisc logs (qdisc_*.log)
-│
-├── scripts/
-│   ├── mahimahi/
-│   │   ├── single/
-│   │   │   ├── setup.sh        # CPU shielding, cset isolation, env prep (REQUIRED)
-│   │   │   ├── config.yaml     # Experiment parameters
-│   │   │   └── run.sh          # Execute single-flow Mahimahi experiment
-│   │   │
-│   │   └── duo/
-│   │       ├── setup.sh        # CPU shielding, cset isolation, env prep (REQUIRED)
-│   │       ├── config.yaml     # Experiment parameters
-│   │       └── run.sh          # Execute dual-flow Mahimahi experiment
-│   │
-│   └── kernel/
-│       ├── single/
-│       │   ├── setup.sh        # qdisc, namespace, CPU setup (REQUIRED)
-│       │   ├── config.yaml     # Experiment parameters
-│       │   └── run.sh          # Execute single-flow kernel/qdisc experiment
-│       │
-│       └── duo/
-│           ├── setup.sh        # qdisc, namespace, CPU setup (REQUIRED)
-│           ├── config.yaml     # Experiment parameters
-│           └── run.sh          # Execute dual-flow kernel/qdisc experiment
-│
-├── graph.py
-│   └── Debugging utility for inspecting graph / trace shapes
-│
-└── README.md
-```
-
-### Running the Experiment
-
-**MahiMahi**
-
-Run The chmod then ./setup.sh first before running.
-
-Specify flow parameters and CPU isolation settings in the YAML configuration file.
-
-> [!NOTE]
-> - Your CPU must have **at least 4 threads** for **classic-only** experiments and **at least 6 threads** for **dual-flow** experiments. You could also just turn this off in if you don't care about system noise!
-> - Any cores may be selected, but **do not choose cores running critical system tasks**.  
-> - CPU shielding will **evict all existing tasks** from the selected cores; the experiment will **error if tasks cannot be migrated** (e.g., pinned kernel threads or insufficient housekeeping cores).
-
-Lastly, run the SHIELD_SINGLE.sh or SHIELD_DUO.sh. Remember, the flows stack based on the next missing number. So if you already have output_20, the next one will be output_21. 
-
-**Linux Kernel**
-
-Run The chmod then ./setup.sh first before running.
-Specify flow parameters and CPU isolation settings in the YAML configuration file.
-
-> [!NOTE]
-> - Your CPU must have **at least 6 threads** for **classic-only** experiments and **at least 8 threads** for **dual-flow** experiments. You could also just turn this off in if you don't care about system noise!
-> - Any cores may be selected, but **do not choose cores running critical system tasks**.  
-> - CPU shielding will **evict all existing tasks** from the selected cores; the experiment will **error if tasks cannot be migrated** (e.g., pinned kernel threads or insufficient housekeeping cores).
-
-Lastly, run the iproute_duo.sh or iproute_single.sh. Remember, the flows stack based on the next missing number. So if you already have output_20, the next one will be output_21. 
-
-Validation pipeline for comparing Linux kernel DualPI2 vs. Mahimahi's DualPI2.
-
-This tool performs:
-- DTW-based similarity analysis
-- Queue-behavior clustering
-- Permutation-based statistical equivalence testing
-- Visualizations (histograms, CDFs, clustering plots)
+This is not just plotting — it is a **statistically grounded validation system**.
 
 ---
 
-**STEP 1 — Drag in your Data**
-Place Mahimahi results into:
-```
-mahimahi_logs/
-```
+# What This Repository Provides
 
-Place Linux kernel qdisc logs into:
-```
-qdisc_logs/
-```
+## 1️⃣ Automated Log Parsing
 
-These folders ignore contents but remain in git.
+The tool:
 
-**STEP 2 — Start the Validation Console**
-cd dashboard
-python3 main.py
-```
+- Parses Mahimahi logs (`output_*`)
+- Parses Linux qdisc logs (`qdisc_*`)
+- Extracts:
+  - Time-series metrics (packets, ECN marks, queue delay, dropped packets, etc.)
+  - Scalar metrics (iperf totals, average queue delay per run)
 
-You will see:
+For time-series metrics, it computes **DTW (Dynamic Time Warping)** distances:
+- Within-qdisc variability
+- Within-Mahimahi variability
+- Cross Mahimahi ↔ qdisc distances
 
-```
-===============================
-    DTW Analyzer Console
-===============================
-Current DTW Mode: BYTES
--------------------------------
-1.  Run Parser
-2.  View Histograms
-3.  View CDFs
-4.  Run Cluster
-5.  View Cluster Summary
-6.  Visualize Cluster
-7.  Run Parametric Test
-8.  View Parametric Test Results
-9.  View Parametric Test Graph
-10. Exit
-
---------- MODE SWITCH ---------
-11. Switch to PACKETS mode
-12. Switch to BYTES mode
-===============================
-```
+Results are cached for fast reuse.
 
 ---
 
-## Option Details
+## 2️⃣ Statistical Validation (Core Contribution)
 
-### 1. Run Parser
-Reads logs, extracts queue series, computes DTW distances, saves cache.
+We do not rely on visual similarity alone. The framework provides:
 
-### 2. View Histograms
-Shows histogram of:
-- Kernel internal DTWs
-- Mahimahi internal DTWs
-- Cross Mahimahi↔Kernel DTWs
+### ✔ Within-System Variability Envelope
 
-### 3. View CDFs
-Shows cumulative distribution functions of the same sets.
+From within-qdisc and within-Mahimahi DTW distributions, we compute:
 
-### 4. Run Cluster
-Runs K-Medoids + MDS visualization on all DTW distances.
+- `q95_qdisc`
+- `q95_mahimahi`
 
-### 5. View Cluster Summary
-Prints cluster membership and medoids.
+Then define:
 
-### 6. Visualize Cluster
-Plots the embedding colored by clusters.
+- `eps_min = min(q95_qdisc, q95_mahi)`
+- `eps_max = max(q95_qdisc, q95_mahi)`  ← conservative envelope
 
-### 7. Run Parametric Test
-Permutation test to measure whether Mahimahi and Kernel mean DTW differences are statistically significant.
-
-Asks:
-- Number of shuffles
-- Epsilon tolerance (acceptable difference)
-
-### 8. View Parametric Test Results
-Prints the previously computed values.
-
-### 9. View Parametric Test Graph
-Plots histogram & CDF of shuffled DTW means + ε-corrected threshold.
+This defines the “natural variability region.”
 
 ---
 
-## Interpreting Epsilon (ε)
+### ✔ Exceedance Probability
 
-ε defines what mean DTW difference counts as "no meaningful difference".
+For cross distances:
 
-- **BYTES MODE**: ε ≈ average allowed bytes difference per sample
-- **PACKETS MODE**: ε ≈ average allowed packets difference per sample
+\[
+p_{\max} = P(d_{cross} > \varepsilon_{\max})
+\]
 
-- **Small ε** = strict equivalence test
-- **Large ε** = tolerant equivalence test
+This answers:
 
----
-
-## Gitignore Behavior
-
-```
-mahimahi_logs/*
-!mahimahi_logs/.gitkeep
-
-qdisc_logs/*
-!qdisc_logs/.gitkeep
-```
-
-This keeps folders tracked but ignores log contents.
+> How often does Mahimahi exceed conservative within-system variability?
 
 ---
 
-## Purpose
+### ✔ Bootstrap Confidence Intervals (Run-ID Resampling)
 
-A reproducible, statistically validated pipeline to assess whether Mahimahi's DualPI2 queue behavior matches Linux kernel DualPI2.
+We compute a bootstrap CI for `p_max` using **run-ID resampling**  
+(not raw pairwise distances — this preserves dependence structure).
 
-This includes:
-- Queue trace comparison
-- Shape matching (DTW)
-- Cluster stability
-- Permutation equivalence testing
+Outputs:
+- Two-sided CI `[p_lo, p_hi]`
+- One-sided upper bound
 
-Useful for L4S, congestion control research, and simulation validation.
+This quantifies uncertainty due to finite runs.
+
+---
+
+### ✔ Nonparametric Permutation Test
+
+We also provide a permutation test:
+
+- Randomly reshuffle labels
+- Compute mean DTW under random assignments
+- Compare to observed Mahimahi ↔ qdisc mean
+
+Outputs:
+- Observed mean
+- p-value
+- Optional convergence plot
+
+---
+
+### ✔ CI Width vs n
+
+We provide a diagnostic:
+
+- Bootstrap CI width as a function of run count
+- Helps justify why 100 runs (or any n) is sufficient
+
+---
+
+# Output Plots
+
+The framework generates:
+
+### 1️⃣ Triple Histogram
+- Within-qdisc
+- Within-Mahimahi
+- Cross
+- Includes q95 thresholds and p_min / p_max
+
+File:
+
+triple_hist_<mode>.svg
+
+
+---
+
+### 2️⃣ Validation Histogram (Paper Plot)
+Cross-only histogram showing:
+
+- eps_min
+- eps_max
+- p_min
+- p_max
+
+File:
+
+paper-graphs-<bandwidth>-reject_hist_<mode>.svg
+
+
+---
+
+### 3️⃣ Triple CDF (DTW-only)
+
+triple_cdf_<mode>.svg
+
+
+---
+
+### 4️⃣ Overlay Time-Series Check (DTW-only)
+
+overlay_<mode>.svg
+
+
+---
+
+### 5️⃣ CI Width vs n
+
+<mode>_ci_width_vs_n.svg
+
+
+---
+
+# Core Interface: `AQMValidationTool`
+
+This is the main class that powers everything.
+
+It supports:
+
+- Running DTW parser + caching
+- Histogram generation
+- CDF generation
+- Overlay plotting
+- Bootstrap CI printing
+- CI vs n diagnostics
+- Permutation test execution
+- Scalar validation modes
+- Mode switching
+
+It can be used:
+
+- Interactively via menu
+- Programmatically in scripts
+- Fully headless in batch validation
+
+---
+
+# Headless Validation Runner (Used for Final Validation)
+
+We provide a script that runs the full validation pipeline automatically for multiple bandwidth pairs:
+
+- 12 Mbps
+- 50 Mbps
+- 200 Mbps
+
+Without menu interaction.
+
+This is what we used to validate our kernel vs Mahimahi experiments.
+
+It:
+1. Runs parser
+2. Generates histograms
+3. Generates throughput validation
+4. Generates ECN validation
+5. Generates packet-drop validation
+
+All outputs are written into structured subfolders.
+
+---
+
+# `1validation_scripts/` Directory
+
+In addition to the core validation tool, this repository includes  
+a `1validation_scripts/` directory containing helper scripts used for:
+
+- Paper-quality CDF overlays
+- Tuning comparison sweeps
+- Original vs final dataset verification
+
+These scripts do not compute DTW — they generate comparison overlays  
+for throughput and queue delay across tuning configurations.
+
+---
+
+## Overlay CDF Scripts
+
+### `overlay_comparison_throughput_cdf.py`
+
+Generates 3-panel CDF plots of **throughput (iperf)** across:
+
+- 12 Mbps
+- 50 Mbps
+- 200 Mbps
+
+Compares:
+- Mahimahi
+- Kernel (qdisc)
+
+Outputs:
+
+figs_overlay/<name>_cdf_bdp12.svg
+figs_overlay/<name>_cdf_bdp50.svg
+figs_overlay/<name>_cdf_bdp200.svg
+
+
+Used for BDP sweep comparisons.
+
+---
+
+### `overlay_qdelay_cdf.py`
+
+Generates CDF overlays for queue delay (e.g., `qdelay_c`) across:
+
+- Baseline Mahimahi
+- Tuned target-30ms variant
+- Tuned target-45ms variant
+- Kernel qdisc
+
+Across 12 / 50 / 200 Mbps.
+
+Used for **target-based tuning evaluation**.
+
+---
+
+### `overlay_throughput_cdf_target.py`
+
+Throughput CDF comparison for **target-based Mahimahi variants**  
+against kernel qdisc.
+
+---
+
+### `overlay_throughput_cdf_thresh.py`
+
+Throughput CDF comparison for **threshold-based tuning sweeps**  
+(e.g., L4S threshold variants) against kernel qdisc.
+
+---
+
+# Verification Scripts
+
+These are batch runners tied to specific experiment sets.
+
+---
+
+## `verify_original.py`
+
+Runs the full validation pipeline on the **original dataset selection**.
+
+“Original” refers to:
+
+- The earlier experiment set
+- Before later tuning refinements
+- Before the improved threshold/target selection
+
+This reflects the baseline Mahimahi configuration before final tuning.
+
+---
+
+## `verify_finale.py`
+
+Runs validation on the **finale dataset selection**.
+
+“Finale” refers to:
+
+- The final tuned configuration
+- The set we determined to be best validated
+- The configuration used for final reporting
+
+In short:
+
+| Script | Meaning |
+|--------|----------|
+| `verify_original.py` | Earlier baseline validation set |
+| `verify_finale.py` | Final best validated configuration |
+
+---
+
+# Directory Conventions
+
+Expected input naming:
+
+- Mahimahi logs: `output_*`
+- qdisc logs: `qdisc_*`
+
+Expected directory structure example:
+
+
+qdisc/
+12mbps/
+50mbps/
+200mbps/
+
+mahimahi/
+12mbps/
+50mbps/
+200mbps/
+
+
+---
+
+# Design Philosophy
+
+This framework was built to ensure:
+
+- Reproducibility
+- Statistical rigor
+- No reliance on visual-only comparison
+- Clear separation of:
+  - Within-system variability
+  - Cross-system discrepancy
+  - Statistical confidence
+
+It enables principled statements such as:
+
+> “The cross-system exceedance rate is below 5% with 95% confidence.”
+
+Instead of:
+
+> “The curves look similar.”
+
+---
+
+# Summary
+
+This repository provides:
+
+- Automated Mahimahi ↔ kernel comparison
+- DTW-based time-series validation
+- Scalar metric validation
+- Bootstrap CI estimation
+- Nonparametric permutation testing
+- Batch experiment validation
+- Paper-quality overlay visualizations
+- Original vs final tuning verification
+
+It is a complete statistical validation framework  
+for evaluating Mahimahi emulation fidelity against Linux qdisc behavior.
+
+---
