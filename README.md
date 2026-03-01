@@ -1,6 +1,6 @@
 # Mahimahi Validation Framework
 
-A structured experimental and validation framework for comparing **Mahimahi-based network emulation** against **native Linux kernel qdisc behavior**, supporting single-flow and dual-flow experiments with reproducible setup, logging, and statistical validation.
+A structured experimental and validation framework for comparing **the Mahimahi DualPI2 module** against the **native Linux kernel DualPI2 qdisc implementation**, supporting single-flow and dual-flow experiments with reproducible setup, logging, and statistical validation.
 
 ---
 
@@ -57,7 +57,7 @@ mahimahi_validation/
 
 ### Running the Experiment
 
-**MahiMahi**
+**Mahimahi**
 
 Run The chmod then ./setup.sh first before running.
 
