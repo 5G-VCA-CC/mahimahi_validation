@@ -609,6 +609,7 @@ class AQMValidationTool:
         B=2000,
         alpha=0.05,
         seed=0,
+        show_yaxis=True,   # NEW
     ):
         """
         Saves CI width vs n into figs/, auto-suffix if file exists.
@@ -633,7 +634,9 @@ class AQMValidationTool:
             alpha=alpha,
             seed=seed,
             out_path=out_path,
+            show_yaxis=show_yaxis,   # PASS THROUGH
         )
+
         print(f"Saved: {out_path.resolve()}")
 
     def print_ci_vs_n(

@@ -492,7 +492,10 @@ class Overlay_Plot_BDP:
         axs = []
 
         for idx, (suffix, mahi_root, kernel_root, seed) in enumerate(roots):
-            fig, ax = plt.subplots(figsize=(6.6, 5.6))
+            if idx == 0:
+                fig, ax = plt.subplots(figsize=(7.5, 6.3))  # wider for first panel
+            else:
+                fig, ax = plt.subplots(figsize=(6.6, 5.6))
 
             # -------------------------
             # Mahimahi series (default)
@@ -539,14 +542,15 @@ class Overlay_Plot_BDP:
             if idx == 0:
                 ax.set_ylabel(ylab, fontsize=28)
                 ax.legend(
-                    fontsize=28,
+                    loc="upper left",
+                    fontsize=24.5,
                     frameon=True,          # turn box on
                     fancybox=True,         # rounded corners
-                    framealpha=0.95,       # solid box
+                    framealpha=0.75,       # solid box
                     edgecolor="black",     # border color
                     facecolor="white",     # background color
                 )
-                fig.subplots_adjust(left=0.17, right=0.98, bottom=0.20, top=0.97)
+                fig.subplots_adjust(left=0.1, right=1, bottom=0.20, top=0.97)
             else:
                 ax.set_ylabel("")
                 ax.tick_params(axis="y", which="both", left=False, labelleft=False)

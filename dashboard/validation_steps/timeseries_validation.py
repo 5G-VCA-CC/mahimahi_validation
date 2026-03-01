@@ -252,13 +252,13 @@ def plot_bootstrap_ci_vs_n(
     alpha=0.05,
     seed=0,
     out_path: str | Path | None = None,
+    show_yaxis=True,   # ← FIXED (was show_xaxis)
 ):
     """
     Plot CI width (p_hi - p_lo) vs number of flows n.
     """
     import matplotlib.ticker as mticker
 
-    # ---- consistent styling (match histogram panels) ----
     plt.rcParams.update({
         "font.family": "DejaVu Sans",
         "mathtext.fontset": "dejavusans",
@@ -285,6 +285,7 @@ def plot_bootstrap_ci_vs_n(
     ci_widths = np.array([r[2] - r[1] for r in results])
 
     fig, ax = plt.subplots(figsize=(9, 7))
+
     ax.plot(
         n_vals,
         ci_widths,
@@ -294,18 +295,61 @@ def plot_bootstrap_ci_vs_n(
         color="black",
     )
 
-    ax.set_xlabel("Number of Flows (n)", fontsize=AXIS_LABEL_SIZE, labelpad=12)
-    ax.set_ylabel("CI Width", fontsize=AXIS_LABEL_SIZE, labelpad=12)
-    ax.tick_params(axis="x", labelsize=TICK_SIZE)
-    ax.tick_params(axis="y", labelsize=TICK_SIZE)
+    # ---- X AXIS (always shown) ----
+    ax.set_xlabel(
+        "Number of Flows per System (n)",
+        fontsize=AXIS_LABEL_SIZE,
+        labelpad=8
+    )
+
+    ax.tick_params(
+        axis="x",
+        labelsize=TICK_SIZE,
+        labelrotation=30
+    )
+
+    for label in ax.get_xticklabels():
+        label.set_ha("right")
+
+    # ---- Y AXIS CONTROL ----
+    if show_yaxis:
+        ax.set_ylabel(
+            "CI Width",
+            fontsize=AXIS_LABEL_SIZE,
+            labelpad=8
+        )
+
+        ax.tick_params(
+            axis="y",
+            labelsize=TICK_SIZE,
+            labelrotation=30
+        )
+
+        for label in ax.get_yticklabels():
+            label.set_va("center")
+    else:
+        ax.set_ylabel("")
+        ax.set_yticklabels([])
+        ax.tick_params(axis="y", length=0)
 
     ax.grid(True, alpha=0.2, linewidth=0.5)
-    ax.set_title(rf"Bootstrap {(1-alpha)*100:.0f}% CI Width vs Sample Size", fontsize=TITLE_SIZE, pad=15)
+
+    # ax.set_title(
+    #     rf"{(1-alpha)*100:.0f}% CI Width vs Sample Size",
+    #     fontsize=TITLE_SIZE,
+    #     pad=15
+    # )
 
     ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, pos: f"{x:.3f}"))
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, pos: f"{x:.3f}")
+    )
 
-    fig.subplots_adjust(left=0.20, right=0.98, bottom=0.22, top=0.90)
+    # tighter when no y-axis
+    if show_yaxis:
+        fig.subplots_adjust(left=0.27, right=0.98, bottom=0.22, top=0.90)
+    else:
+        fig.subplots_adjust(left=0.08, right=0.98, bottom=0.22, top=0.90)
 
     if out_path is None:
         return fig
@@ -315,7 +359,6 @@ def plot_bootstrap_ci_vs_n(
     fig.savefig(out_path, format="svg")
     plt.close(fig)
     return None
-
 
 def plot_validation_hist(
     an: DTWAnalyzer,
