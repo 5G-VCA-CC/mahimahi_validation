@@ -64,7 +64,13 @@ How to use
   - Prints bootstrap confidence intervals for p_hat_max (original and final configurations).  
   - Plots CI width vs number of runs to verify that the sample size is sufficient and that the interval stabilizes.
 
-WHAT THIS REPOSITORY PROVIDES
+# WHAT THIS REPOSITORY PROVIDES
+
+> [!NOTE]
+> This framework can be used either with the datasets included in this repository  
+> or with your own collected Mahimahi and kernel experiment logs.  
+> Simply point the validation tool to your data directories.
+> below describes in detail the features this repo provides.
 
 1. Automated Log Parsing
 
