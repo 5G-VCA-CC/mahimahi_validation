@@ -12,6 +12,8 @@ It is designed to answer, rigorously and reproducibly:
 
 ---
 
+## Running Validation Using `1validation_scripts/` 
+
 > [!NOTE]  
 > If you only want to validate the data we have already collected, simply run the scripts as provided.  
 > No modifications are required — they already point to the correct data directories included in this repository.
